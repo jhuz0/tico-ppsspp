@@ -139,10 +139,12 @@ jobs:
           ninja -C build_switch_tico -t targets all > /tmp/ninja-targets.txt
           objs=""
           for src in PpssppRuntime PpssppTicoConfig; do
-            obj=$(grep -oE "^[^:]*${src}\.cpp\.o" /tmp/ninja-targets.txt | head -1 || true)
+            # CMake may name objects <src>.o or <src>.cpp.o depending on version.
+            obj=$(grep -oE "^[^:]*${src}(\.cpp)?\.o" /tmp/ninja-targets.txt | head -1 || true)
             if [ -z "$obj" ]; then
               echo "::error::no ninja target found for ${src}.cpp"
-              grep -iE "tico|Ppsspp" /tmp/ninja-targets.txt | head -20
+              echo "--- targets under tico-ppsspp.dir ---"
+              grep -E "tico-ppsspp\.dir" /tmp/ninja-targets.txt | head -30
               exit 1
             fi
             echo "found: $obj"

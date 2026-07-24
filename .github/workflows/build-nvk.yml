@@ -157,13 +157,11 @@ jobs:
           # hardcoding. --start-group below makes order irrelevant, and libnvk
           # itself is whole-archived separately.
           #
-          # libnouveau_codegen.a is excluded on purpose: it is nv50_ir, the shader
-          # compiler for the old Gallium nouveau driver. NVK uses NAK instead, and
-          # nxvk's own link line leaves it out. Pulling it in drags a large C++
-          # codebase whose COMDAT template instantiations break this link.
-          present=$(find src -name '*.a' \
-                      ! -name 'libnvk.a' \
-                      ! -name 'libnouveau_codegen.a' | sort | tr '\n' ' ')
+          # This deliberately includes libnouveau_codegen.a (nv50_ir), which
+          # nxvk's own 26.x link line omits: on Mesa 25.x, NVK still routes
+          # pre-Turing GPUs through the legacy codegen (nvk_cg_compile_nir ->
+          # nv50_ir_generate_code), and the Switch's GM20B is Maxwell.
+          present=$(find src -name '*.a' ! -name 'libnvk.a' | sort | tr '\n' ' ')
           echo "--- support archives ---"; echo "$present" | tr ' ' '\n' | grep .
 
           # Mesa's xmlconfig parses driconf through expat. Bundle it so the

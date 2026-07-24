@@ -79,6 +79,16 @@ jobs:
           path: nxvk
           fetch-depth: 1
 
+      # nxvk's crossfiles and rustc wrapper hardcode /work (their podman bind
+      # mount point): rust.cross points at /work/switch/rust/rustc-switch.sh and
+      # the wrapper passes --sysroot /work/switch/rust/sysroot. Reproduce that
+      # layout instead of patching their scripts.
+      - name: Expose the tree at /work
+        run: |
+          set -eux
+          ln -sfn "$GITHUB_WORKSPACE/nxvk" /work
+          ls -la /work/switch/rust/
+
       - name: Cross-build plumbing
         run: |
           set -eux
@@ -99,6 +109,15 @@ jobs:
           /opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar rcs \
             /opt/devkitpro/portlibs/switch/lib/libdl.a
           ls /opt/switch-cross-include/ | head
+
+      # Undocumented but required: rustc-switch.sh passes an explicit
+      # --sysroot, so the Rust std for the custom aarch64-switch-horizon
+      # target has to exist before meson probes the Rust compiler.
+      - name: Build Rust std sysroot for aarch64-switch-horizon
+        run: |
+          set -eux
+          cd /work
+          bash switch/rust/build-std-sysroot.sh
 
       - name: Build native tools (mesa_clc, vtn_bindgen2)
         run: |

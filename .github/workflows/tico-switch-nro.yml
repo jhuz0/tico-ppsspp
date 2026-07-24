@@ -1,0 +1,232 @@
+name: Build tico-ppsspp NRO (Switch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      nvk_run_id:
+        description: >-
+          Run id of "Build NVK libvulkan.a (Switch)" to take the real driver
+          from. Leave empty to link a stub (compile validation only).
+        required: false
+        type: string
+  push:
+    branches:
+      - tico-input-mapping
+
+jobs:
+  build:
+    name: Build NRO
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          # devkitPro images ship dkp-pacman; refresh and pull the Switch portlibs
+          # PPSSPP links against (mesa gives us libvulkan/glapi/drm_nouveau).
+          dkp-pacman -Syu --noconfirm --needed \
+            switch-dev \
+            switch-mesa \
+            switch-glm \
+            switch-zlib \
+            switch-bzip2 \
+            switch-libpng \
+            switch-freetype \
+            switch-zstd \
+            switch-libzip \
+            switch-curl \
+            switch-mbedtls \
+            switch-sdl2 || true
+          apt-get update -qq
+          apt-get install -y -qq cmake ninja-build python3 pkg-config file
+          cmake --version
+          aarch64-none-elf-gcc --version | head -1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Apply tico submodule patches
+        run: |
+          set -eux
+          apply() {
+            local patch="$1" dir="$2"
+            if [ ! -f "$patch" ]; then echo "missing $patch"; return 1; fi
+            # Idempotent: skip if it is already applied.
+            if git -C "$dir" apply --reverse --check "$GITHUB_WORKSPACE/$patch" 2>/dev/null; then
+              echo "already applied: $patch"
+            else
+              git -C "$dir" apply --verbose "$GITHUB_WORKSPACE/$patch"
+              echo "applied: $patch"
+            fi
+          }
+          apply gitPatches/ext_aemu_postoffice.patch ext/aemu_postoffice
+          apply gitPatches/ext_cpu_features.patch    ext/cpu_features
+          apply gitPatches/ext_glslang.patch         ext/glslang
+          apply gitPatches/ext_miniupnp.patch        ext/miniupnp
+          apply gitPatches/ffmpeg.patch              ffmpeg
+
+      - name: Cache ffmpeg switch build
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg/switch_build
+          key: ffmpeg-switch-${{ hashFiles('gitPatches/ffmpeg.patch') }}-${{ hashFiles('.gitmodules') }}
+
+      - name: Build ffmpeg for Switch
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          cd ffmpeg
+          chmod +x switch.sh
+          ./switch.sh
+          ls -la switch_build/lib
+
+      # devkitPro ships no Vulkan for Switch (switch-mesa is OpenGL-only via
+      # nouveau). tico links a private NVK build (MESA_NVK_DIR=/nvk-build) that
+      # is not published. Without it we cannot produce a runnable NRO, so when
+      # NVK is absent we fall back to a stub archive: every translation unit
+      # still compiles, which is what validates a source change.
+      - name: Fetch NVK driver
+        if: inputs.nvk_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: nvk-switch-libvulkan
+          path: nvk
+          run-id: ${{ inputs.nvk_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Provide Vulkan archive (stub fallback)
+        id: vk
+        run: |
+          set -eux
+          # Real driver, built by the build-nvk workflow from nxvk.
+          if [ -f "$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" ]; then
+            NM=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm
+            "$NM" --defined-only --extern-only "$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" \
+              | grep -E " (T|W) vkGetInstanceProcAddr$"
+            echo "lib=$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" >> "$GITHUB_OUTPUT"
+            echo "stub=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -f "${MESA_NVK_DIR:-/nvk-build}/src/nouveau/vulkan/libvulkan.a" ]; then
+            echo "lib=${MESA_NVK_DIR:-/nvk-build}/src/nouveau/vulkan/libvulkan.a" >> "$GITHUB_OUTPUT"
+            echo "stub=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p /tmp/vkstub
+          cat > /tmp/vkstub/stub.c <<'EOF'
+          /* Stub vkGetInstanceProcAddr so CMake resolves VULKAN_LIBRARY and the
+             whole tree compiles. A binary linked against this cannot render. */
+          typedef void (*PFN_vkVoidFunction)(void);
+          PFN_vkVoidFunction vkGetInstanceProcAddr(void *instance, const char *pName);
+          PFN_vkVoidFunction vkGetInstanceProcAddr(void *instance, const char *pName) {
+            (void)instance; (void)pName; return 0;
+          }
+          EOF
+          /opt/devkitpro/devkitA64/bin/aarch64-none-elf-gcc \
+            -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -O2 \
+            -D__SWITCH__ -c /tmp/vkstub/stub.c -o /tmp/vkstub/stub.o
+          /opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar rcs /tmp/vkstub/libvulkan.a /tmp/vkstub/stub.o
+          echo "lib=/tmp/vkstub/libvulkan.a" >> "$GITHUB_OUTPUT"
+          echo "stub=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::No NVK available - using stub libvulkan.a. Output validates compilation only and will NOT run on hardware."
+
+      - name: Configure
+        run: |
+          set -eux
+          cmake -S . -B build_switch_tico \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake \
+            -DSWITCH_VULKAN_LIBRARY="${{ steps.vk.outputs.lib }}" \
+            -DUSE_LIBNX=ON \
+            -DSWITCH_VULKAN_ONLY=ON \
+            -DUSE_DISCORD=OFF \
+            -DHEADLESS=ON \
+            -DLIBRETRO=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -U CMAKE_EXE_LINKER_FLAGS_RELEASE \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -g0 -ffunction-sections -fdata-sections -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -g0 -ffunction-sections -fdata-sections -fomit-frame-pointer"
+
+      # Hard gate: the files this branch changes must cross-compile for Switch.
+      # Independent of Vulkan, since neither is involved in linking.
+      - name: Compile changed sources (must pass)
+        run: |
+          set -eu
+          ninja -C build_switch_tico -t targets all > /tmp/ninja-targets.txt
+          objs=""
+          for src in PpssppRuntime PpssppTicoConfig; do
+            # CMake may name objects <src>.o or <src>.cpp.o depending on version.
+            obj=$(grep -oE "^[^:]*${src}(\.cpp)?\.o" /tmp/ninja-targets.txt | head -1 || true)
+            if [ -z "$obj" ]; then
+              echo "::error::no ninja target found for ${src}.cpp"
+              echo "--- targets under tico-ppsspp.dir ---"
+              grep -E "tico-ppsspp\.dir" /tmp/ninja-targets.txt | head -30
+              exit 1
+            fi
+            echo "found: $obj"
+            objs="$objs $obj"
+          done
+          # shellcheck disable=SC2086
+          ninja -C build_switch_tico $objs
+          for o in $objs; do
+            ls -la "build_switch_tico/$o"
+            /opt/devkitpro/devkitA64/bin/aarch64-none-elf-objdump -h "build_switch_tico/$o" | head -5
+          done
+
+      - name: Build NRO
+        id: nro
+        continue-on-error: ${{ steps.vk.outputs.stub == 'true' }}
+        run: cmake --build build_switch_tico -j"$(nproc)" --target tico-ppsspp_nro
+
+      - name: Verify artifact
+        if: steps.nro.outcome == 'success'
+        run: |
+          set -eux
+          ls -la build_switch_tico/tico-ppsspp.nro
+          file build_switch_tico/tico-ppsspp.nro
+          sha256sum build_switch_tico/tico-ppsspp.nro
+
+      - name: Upload NRO
+        if: steps.nro.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tico-ppsspp-nro${{ steps.vk.outputs.stub == 'true' && '-STUB-VULKAN-DOES-NOT-RUN' || '' }}
+          path: build_switch_tico/tico-ppsspp.nro
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## tico-ppsspp Switch build"
+            echo ""
+            if [ "${{ steps.vk.outputs.stub }}" = "true" ]; then
+              echo "**Vulkan:** stub (no NVK available)."
+              echo "Any NRO produced validates compilation only and will NOT run on hardware."
+            else
+              echo "**Vulkan:** real NVK archive."
+            fi
+            echo ""
+            echo "- Changed-source compile: \`${{ job.status }}\` (gated, must pass)"
+            echo "- NRO link: \`${{ steps.nro.outcome }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CMake logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build_switch_tico/CMakeFiles/CMakeOutput.log
+            build_switch_tico/CMakeFiles/CMakeError.log
+            build_switch_tico/CMakeCache.txt
+          if-no-files-found: ignore

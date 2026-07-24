@@ -135,11 +135,25 @@ jobs:
       # Independent of Vulkan, since neither is involved in linking.
       - name: Compile changed sources (must pass)
         run: |
-          set -eux
-          ninja -C build_switch_tico \
-            CMakeFiles/tico-ppsspp.dir/tico/PpssppRuntime.cpp.o \
-            CMakeFiles/tico-ppsspp.dir/tico/PpssppTicoConfig.cpp.o
-          ls -la build_switch_tico/CMakeFiles/tico-ppsspp.dir/tico/
+          set -eu
+          ninja -C build_switch_tico -t targets all > /tmp/ninja-targets.txt
+          objs=""
+          for src in PpssppRuntime PpssppTicoConfig; do
+            obj=$(grep -oE "^[^:]*${src}\.cpp\.o" /tmp/ninja-targets.txt | head -1 || true)
+            if [ -z "$obj" ]; then
+              echo "::error::no ninja target found for ${src}.cpp"
+              grep -iE "tico|Ppsspp" /tmp/ninja-targets.txt | head -20
+              exit 1
+            fi
+            echo "found: $obj"
+            objs="$objs $obj"
+          done
+          # shellcheck disable=SC2086
+          ninja -C build_switch_tico $objs
+          for o in $objs; do
+            ls -la "build_switch_tico/$o"
+            /opt/devkitpro/devkitA64/bin/aarch64-none-elf-objdump -h "build_switch_tico/$o" | head -5
+          done
 
       - name: Build NRO
         id: nro

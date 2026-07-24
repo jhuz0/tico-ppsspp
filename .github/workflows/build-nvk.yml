@@ -152,22 +152,12 @@ jobs:
           AR=$DKP/devkitA64/bin/aarch64-none-elf-ar
           NM=$DKP/devkitA64/bin/aarch64-none-elf-nm
 
-          # Support archives in dependency order, taken from nxvk's build-nro.sh.
-          ARCHIVES="
-            src/util/libmesa_util.a src/util/libmesa_util_simd.a src/util/blake3/libblake3.a
-            src/c11/impl/libmesa_util_c11.a
-            src/nouveau/compiler/libnak.a src/nouveau/compiler/libnak_rs.a
-            src/compiler/rust/libcompiler_c_helpers.a
-            src/nouveau/headers/libnvidia_headers_c.a
-            src/nouveau/nil/libnil.a src/nouveau/nil/liblibnil_format_table.a
-            src/compiler/nir/libnir.a src/compiler/libcompiler.a
-            src/nouveau/mme/libnouveau_mme.a src/nouveau/winsys/libnouveau_ws.a
-            src/vulkan/util/libvulkan_util.a src/compiler/spirv/libvtn.a
-            src/util/libxmlconfig.a"
-          present=""
-          for a in $ARCHIVES; do
-            if [ -f "$a" ]; then present="$present $a"; else echo "::warning::missing archive $a"; fi
-          done
+          # Archive names drift between Mesa versions (25.0.7 has liblibnil.a,
+          # libmesa_util_sse41.a and libnouveau_codegen.a where 26.x differs), so
+          # discover them instead of hardcoding. --start-group below makes order
+          # irrelevant. libnvk itself is whole-archived separately.
+          present=$(find src -name '*.a' ! -name 'libnvk.a' | sort | tr '\n' ' ')
+          echo "--- support archives ---"; echo "$present" | tr ' ' '\n' | grep .
 
           # --start-group resolves the cyclic references between Mesa archives.
           # libnvk must be whole-archived or the entrypoints get dropped.
@@ -183,13 +173,15 @@ jobs:
             | sort -u | tee /tmp/entrypoints.txt || true
 
           if grep -qE " (T|W) vkGetInstanceProcAddr$" /tmp/entrypoints.txt; then
-            echo "OK: standard vkGetInstanceProcAddr is exported - tico cores can link this directly."
+            echo "Standard vkGetInstanceProcAddr already exported; no shim needed."
             KEEP="--keep-global-symbol=vkGetInstanceProcAddr"
+            NEED_SHIM=0
           else
-            echo "::warning::vkGetInstanceProcAddr not found; only the ICD entry point is available."
-            echo "::warning::A shim aliasing vkGetInstanceProcAddr -> vk_icdGetInstanceProcAddr will be required."
+            echo "Only the ICD entry point is exported; adding the loaderless shim."
             KEEP=""
+            NEED_SHIM=1
           fi
+          echo "NEED_SHIM=$NEED_SHIM" >> "$GITHUB_ENV"
 
           # Keep the ICD trio global too so Cemu-style consumers work as well.
           # shellcheck disable=SC2086
@@ -200,11 +192,44 @@ jobs:
             --keep-global-symbol=vk_icdGetPhysicalDeviceProcAddr \
             /tmp/libnvk_merged.o /tmp/libnvk_local.o
 
+          # Mesa exports only the ICD entry point. tico cores declare the standard
+          # name instead (VulkanLoader.cpp: __asm__("vkGetInstanceProcAddr")), so
+          # forward one to the other. VKAPI_ATTR/VKAPI_CALL are empty on aarch64,
+          # which makes this plain C declaration ABI-compatible.
+          SHIM_OBJ=""
+          if [ "$NEED_SHIM" = "1" ]; then
+            cat > /tmp/vk_loaderless_shim.c <<'EOF'
+          typedef void (*PFN_vkVoidFunction)(void);
+          typedef struct VkInstance_T *VkInstance;
+
+          PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+
+          PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
+          {
+            return vk_icdGetInstanceProcAddr(instance, pName);
+          }
+          EOF
+            $DKP/devkitA64/bin/aarch64-none-elf-gcc \
+              -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -O2 \
+              -ffunction-sections -fdata-sections -D__SWITCH__ \
+              -c /tmp/vk_loaderless_shim.c -o /tmp/vk_loaderless_shim.o
+            SHIM_OBJ=/tmp/vk_loaderless_shim.o
+          fi
+
           mkdir -p "$GITHUB_WORKSPACE/out/lib" "$GITHUB_WORKSPACE/out/include"
-          "$AR" rcs "$GITHUB_WORKSPACE/out/lib/libvulkan.a" /tmp/libnvk_local.o
+          # shellcheck disable=SC2086
+          "$AR" rcs "$GITHUB_WORKSPACE/out/lib/libvulkan.a" /tmp/libnvk_local.o $SHIM_OBJ
           cp -r "$GITHUB_WORKSPACE/nxvk/include/vulkan" "$GITHUB_WORKSPACE/out/include/" 2>/dev/null || true
-          cp /tmp/libnvk_merged.o "$GITHUB_WORKSPACE/out/lib/libnvk_merged.o"
           cp /tmp/entrypoints.txt "$GITHUB_WORKSPACE/out/entrypoints.txt"
+
+          echo "=== global symbols in the packaged libvulkan.a ==="
+          "$NM" --defined-only --extern-only "$GITHUB_WORKSPACE/out/lib/libvulkan.a" \
+            | grep -E " (T|W) " | sort -u | tee "$GITHUB_WORKSPACE/out/exported-symbols.txt"
+
+          # Both names must resolve or the cores will not link.
+          grep -qE " (T|W) vkGetInstanceProcAddr$"     "$GITHUB_WORKSPACE/out/exported-symbols.txt"
+          grep -qE " (T|W) vk_icdGetInstanceProcAddr$" "$GITHUB_WORKSPACE/out/exported-symbols.txt"
+          echo "OK: libvulkan.a exports vkGetInstanceProcAddr and vk_icdGetInstanceProcAddr"
 
           cd "$GITHUB_WORKSPACE/out"
           sha256sum lib/libvulkan.a | tee lib/libvulkan.a.sha256

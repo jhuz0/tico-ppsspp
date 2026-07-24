@@ -152,11 +152,18 @@ jobs:
           AR=$DKP/devkitA64/bin/aarch64-none-elf-ar
           NM=$DKP/devkitA64/bin/aarch64-none-elf-nm
 
-          # Archive names drift between Mesa versions (25.0.7 has liblibnil.a,
-          # libmesa_util_sse41.a and libnouveau_codegen.a where 26.x differs), so
-          # discover them instead of hardcoding. --start-group below makes order
-          # irrelevant. libnvk itself is whole-archived separately.
-          present=$(find src -name '*.a' ! -name 'libnvk.a' | sort | tr '\n' ' ')
+          # Archive names drift between Mesa versions (25.0.7 has liblibnil.a and
+          # libmesa_util_sse41.a where 26.x differs), so discover them instead of
+          # hardcoding. --start-group below makes order irrelevant, and libnvk
+          # itself is whole-archived separately.
+          #
+          # libnouveau_codegen.a is excluded on purpose: it is nv50_ir, the shader
+          # compiler for the old Gallium nouveau driver. NVK uses NAK instead, and
+          # nxvk's own link line leaves it out. Pulling it in drags a large C++
+          # codebase whose COMDAT template instantiations break this link.
+          present=$(find src -name '*.a' \
+                      ! -name 'libnvk.a' \
+                      ! -name 'libnouveau_codegen.a' | sort | tr '\n' ' ')
           echo "--- support archives ---"; echo "$present" | tr ' ' '\n' | grep .
 
           # Mesa's xmlconfig parses driconf through expat. Bundle it so the
@@ -189,13 +196,20 @@ jobs:
           fi
           echo "NEED_SHIM=$NEED_SHIM" >> "$GITHUB_ENV"
 
-          # Keep the ICD trio global too so Cemu-style consumers work as well.
-          # shellcheck disable=SC2086
-          "$OBJCOPY" \
-            $KEEP \
-            --keep-global-symbol=vk_icdGetInstanceProcAddr \
-            --keep-global-symbol=vk_icdNegotiateLoaderICDInterfaceVersion \
-            --keep-global-symbol=vk_icdGetPhysicalDeviceProcAddr \
+          # Hide Mesa's symbols so they cannot collide with the consumer's own
+          # dispatch table (PPSSPP declares globals literally named vkCreateInstance
+          # and friends), while keeping the entry points reachable.
+          #
+          # Localize only STRONG globals (T/D/B). Weak symbols (W/V) are C++ COMDAT
+          # template instantiations living in link-once section groups: localizing
+          # those breaks the group semantics and the link fails with "defined in
+          # discarded section" once --gc-sections runs.
+          KEEP_RE='^(vkGetInstanceProcAddr|vk_icdGetInstanceProcAddr|vk_icdNegotiateLoaderICDInterfaceVersion|vk_icdGetPhysicalDeviceProcAddr)$'
+          "$NM" --defined-only --extern-only /tmp/libnvk_merged.o \
+            | awk '$2 ~ /^[TDBRtdbr]$/ && $3 != "" {print $3}' \
+            | grep -vE "$KEEP_RE" | sort -u > /tmp/localize.txt
+          echo "localizing $(wc -l < /tmp/localize.txt) strong global symbols"
+          "$OBJCOPY" --localize-symbols=/tmp/localize.txt \
             /tmp/libnvk_merged.o /tmp/libnvk_local.o
 
           # Mesa exports only the ICD entry point. tico cores declare the standard

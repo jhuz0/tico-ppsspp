@@ -159,12 +159,18 @@ jobs:
           present=$(find src -name '*.a' ! -name 'libnvk.a' | sort | tr '\n' ' ')
           echo "--- support archives ---"; echo "$present" | tr ' ' '\n' | grep .
 
+          # Mesa's xmlconfig parses driconf through expat. Bundle it so the
+          # result is self-contained: tico's cores add only -ldrm_nouveau/-lzstd/-lz
+          # to their link lines, never -lexpat.
+          EXPAT=$DKP/portlibs/switch/lib/libexpat.a
+          [ -f "$EXPAT" ] || { echo "::error::missing $EXPAT (need switch-libexpat)"; exit 1; }
+
           # --start-group resolves the cyclic references between Mesa archives.
           # libnvk must be whole-archived or the entrypoints get dropped.
           # shellcheck disable=SC2086
           "$LD" -r \
             --whole-archive src/nouveau/vulkan/libnvk.a --no-whole-archive \
-            --start-group $present --end-group \
+            --start-group $present "$EXPAT" --end-group \
             -o /tmp/libnvk_merged.o
 
           echo "=== Vulkan entry points present in the merged object ==="
@@ -216,9 +222,20 @@ jobs:
             SHIM_OBJ=/tmp/vk_loaderless_shim.o
           fi
 
+          # devkitPro's newlib has no getuid/sysconf/posix_memalign/regex/getrandom,
+          # which Mesa and the Rust std bits in NAK reference. nxvk already ships
+          # the gap fills; keep them in their own object (not localized) so the
+          # symbols stay available to whatever links this archive.
+          $DKP/devkitA64/bin/aarch64-none-elf-gcc \
+            -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -O2 \
+            -ffunction-sections -fdata-sections -D__SWITCH__ -D_GNU_SOURCE \
+            -I$DKP/libnx/include -I$DKP/portlibs/switch/include \
+            -c "$GITHUB_WORKSPACE/nxvk/switch/smoke/nvk_compat.c" -o /tmp/nvk_compat.o
+
           mkdir -p "$GITHUB_WORKSPACE/out/lib" "$GITHUB_WORKSPACE/out/include"
           # shellcheck disable=SC2086
-          "$AR" rcs "$GITHUB_WORKSPACE/out/lib/libvulkan.a" /tmp/libnvk_local.o $SHIM_OBJ
+          "$AR" rcs "$GITHUB_WORKSPACE/out/lib/libvulkan.a" \
+            /tmp/libnvk_local.o /tmp/nvk_compat.o $SHIM_OBJ
           cp -r "$GITHUB_WORKSPACE/nxvk/include/vulkan" "$GITHUB_WORKSPACE/out/include/" 2>/dev/null || true
           cp /tmp/entrypoints.txt "$GITHUB_WORKSPACE/out/entrypoints.txt"
 

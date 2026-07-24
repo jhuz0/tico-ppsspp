@@ -2,6 +2,13 @@ name: Build tico-ppsspp NRO (Switch)
 
 on:
   workflow_dispatch:
+    inputs:
+      nvk_run_id:
+        description: >-
+          Run id of "Build NVK libvulkan.a (Switch)" to take the real driver
+          from. Leave empty to link a stub (compile validation only).
+        required: false
+        type: string
   push:
     branches:
       - tico-input-mapping
@@ -87,10 +94,28 @@ jobs:
       # is not published. Without it we cannot produce a runnable NRO, so when
       # NVK is absent we fall back to a stub archive: every translation unit
       # still compiles, which is what validates a source change.
+      - name: Fetch NVK driver
+        if: inputs.nvk_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: nvk-switch-libvulkan
+          path: nvk
+          run-id: ${{ inputs.nvk_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Provide Vulkan archive (stub fallback)
         id: vk
         run: |
           set -eux
+          # Real driver, built by the build-nvk workflow from nxvk.
+          if [ -f "$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" ]; then
+            NM=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm
+            "$NM" --defined-only --extern-only "$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" \
+              | grep -E " (T|W) vkGetInstanceProcAddr$"
+            echo "lib=$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" >> "$GITHUB_OUTPUT"
+            echo "stub=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -f "${MESA_NVK_DIR:-/nvk-build}/src/nouveau/vulkan/libvulkan.a" ]; then
             echo "lib=${MESA_NVK_DIR:-/nvk-build}/src/nouveau/vulkan/libvulkan.a" >> "$GITHUB_OUTPUT"
             echo "stub=false" >> "$GITHUB_OUTPUT"

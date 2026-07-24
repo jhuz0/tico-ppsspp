@@ -1,0 +1,127 @@
+name: Build tico-ppsspp NRO (Switch)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - tico-input-mapping
+
+jobs:
+  build:
+    name: Build NRO
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          # devkitPro images ship dkp-pacman; refresh and pull the Switch portlibs
+          # PPSSPP links against (mesa gives us libvulkan/glapi/drm_nouveau).
+          dkp-pacman -Syu --noconfirm --needed \
+            switch-dev \
+            switch-mesa \
+            switch-glm \
+            switch-zlib \
+            switch-bzip2 \
+            switch-libpng \
+            switch-freetype \
+            switch-zstd \
+            switch-libzip \
+            switch-curl \
+            switch-mbedtls \
+            switch-sdl2 || true
+          apt-get update -qq
+          apt-get install -y -qq cmake ninja-build python3 pkg-config file
+          cmake --version
+          aarch64-none-elf-gcc --version | head -1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Apply tico submodule patches
+        run: |
+          set -eux
+          apply() {
+            local patch="$1" dir="$2"
+            if [ ! -f "$patch" ]; then echo "missing $patch"; return 1; fi
+            # Idempotent: skip if it is already applied.
+            if git -C "$dir" apply --reverse --check "$GITHUB_WORKSPACE/$patch" 2>/dev/null; then
+              echo "already applied: $patch"
+            else
+              git -C "$dir" apply --verbose "$GITHUB_WORKSPACE/$patch"
+              echo "applied: $patch"
+            fi
+          }
+          apply gitPatches/ext_aemu_postoffice.patch ext/aemu_postoffice
+          apply gitPatches/ext_cpu_features.patch    ext/cpu_features
+          apply gitPatches/ext_glslang.patch         ext/glslang
+          apply gitPatches/ext_miniupnp.patch        ext/miniupnp
+          apply gitPatches/ffmpeg.patch              ffmpeg
+
+      - name: Cache ffmpeg switch build
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg/switch_build
+          key: ffmpeg-switch-${{ hashFiles('gitPatches/ffmpeg.patch') }}-${{ hashFiles('.gitmodules') }}
+
+      - name: Build ffmpeg for Switch
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          cd ffmpeg
+          chmod +x switch.sh
+          ./switch.sh
+          ls -la switch_build/lib
+
+      - name: Configure
+        run: |
+          set -eux
+          cmake -S . -B build_switch_tico \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake \
+            -DUSE_LIBNX=ON \
+            -DSWITCH_VULKAN_ONLY=ON \
+            -DUSE_DISCORD=OFF \
+            -DHEADLESS=ON \
+            -DLIBRETRO=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -U CMAKE_EXE_LINKER_FLAGS_RELEASE \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -g0 -ffunction-sections -fdata-sections -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -g0 -ffunction-sections -fdata-sections -fomit-frame-pointer"
+
+      - name: Build
+        run: cmake --build build_switch_tico -j"$(nproc)" --target tico-ppsspp_nro
+
+      - name: Verify artifact
+        run: |
+          set -eux
+          ls -la build_switch_tico/tico-ppsspp.nro
+          file build_switch_tico/tico-ppsspp.nro
+          sha256sum build_switch_tico/tico-ppsspp.nro
+
+      - name: Upload NRO
+        uses: actions/upload-artifact@v4
+        with:
+          name: tico-ppsspp-nro
+          path: build_switch_tico/tico-ppsspp.nro
+          if-no-files-found: error
+
+      - name: Upload CMake logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build_switch_tico/CMakeFiles/CMakeOutput.log
+            build_switch_tico/CMakeFiles/CMakeError.log
+            build_switch_tico/CMakeCache.txt
+          if-no-files-found: ignore

@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
     inputs:
       nxvk_ref:
-        description: nxvk git ref to build
-        default: main
+        description: nxvk git ref to build (default branch is 'switch')
+        default: switch
         type: string
 
 jobs:

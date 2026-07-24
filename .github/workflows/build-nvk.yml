@@ -1,0 +1,222 @@
+name: Build NVK libvulkan.a (Switch)
+
+# Builds Mesa/NVK for Horizon from PalindromicBreadLoaf/nxvk, then packages the
+# resulting archives into the single libvulkan.a that tico cores expect
+# (-DSWITCH_VULKAN_LIBRARY / MESA_NVK_DIR/src/nouveau/vulkan/libvulkan.a).
+#
+# Upstream Mesa has no libvulkan.a target: it builds libnvk.a (static) plus
+# libvulkan_nouveau.so (shared). tico links "Mesa's loaderless libvulkan.a",
+# which is this repackaging step, not a stock Mesa artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      nxvk_ref:
+        description: nxvk git ref to build
+        default: main
+        type: string
+
+jobs:
+  build:
+    name: Build NVK
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      # Mirrors switch/docker/Dockerfile from nxvk, run as steps so the heavy
+      # bits (cargo, ccache) can be cached between runs.
+      - name: System packages
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            python3-pip bison flex curl ca-certificates pkg-config git \
+            build-essential cmake ninja-build \
+            llvm-15-dev clang-15 libclang-15-dev \
+            libclc-15-dev libclc-15 \
+            llvm-spirv-15 libllvmspirvlib-15-dev spirv-tools \
+            libdrm-dev glslang-tools
+          python3 -m pip install --break-system-packages --no-cache-dir 'meson>=1.4' mako pyyaml
+          meson --version
+          glslangValidator --version | head -2
+
+      - name: Cache Rust toolchain and cargo bins
+        id: rust-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/rust
+          key: nxvk-rust-nightly-bindgen-cbindgen-v1
+
+      - name: Rust + bindgen/cbindgen
+        run: |
+          set -eux
+          export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo
+          export PATH="/opt/rust/cargo/bin:$PATH"
+          if [ ! -x /opt/rust/cargo/bin/rustc ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain nightly --profile minimal --component rust-src
+          fi
+          rustup component add rustfmt || true
+          # bindgen: C->Rust FFI for NAK. cbindgen: Rust->C headers for NIL.
+          command -v bindgen  >/dev/null || cargo install --locked bindgen-cli
+          command -v cbindgen >/dev/null || cargo install --locked cbindgen
+          rustc --version; bindgen --version; cbindgen --version
+          {
+            echo "RUSTUP_HOME=/opt/rust/rustup"
+            echo "CARGO_HOME=/opt/rust/cargo"
+            echo "PATH=/opt/rust/cargo/bin:$PATH"
+            echo "LLVM_CONFIG=/usr/bin/llvm-config-15"
+            echo "LIBCLANG_PATH=/usr/lib/llvm-15/lib"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout nxvk
+        uses: actions/checkout@v4
+        with:
+          repository: PalindromicBreadLoaf/nxvk
+          ref: ${{ inputs.nxvk_ref }}
+          path: nxvk
+          fetch-depth: 1
+
+      - name: Cross-build plumbing
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/nxvk"
+          mkdir -p /opt/switch-cross-include/libdrm
+          cp /usr/include/xf86drm.h /usr/include/xf86drmMode.h /opt/switch-cross-include/ 2>/dev/null || true
+          cp -r /usr/include/libdrm/* /opt/switch-cross-include/ 2>/dev/null || true
+          cp -r /usr/include/libdrm/* /opt/switch-cross-include/libdrm/ 2>/dev/null || true
+          # nxvk's own target stubs (dlfcn.h, sys/mman.h, syslog.h, spirv-tools).
+          cp -r switch/docker/cross-include/. /opt/switch-cross-include/
+          # Host CLC/SPIR-V .pc files, visible to the Switch cross pkg-config dir.
+          XDIR=/opt/devkitpro/portlibs/switch/lib/pkgconfig; mkdir -p "$XDIR"
+          for name in libclc LLVMSPIRVLib SPIRV-Tools SPIRV-Tools-shared SPIRV-Headers; do
+            f=$(find /usr -name "$name.pc" 2>/dev/null | head -1)
+            [ -n "$f" ] && cp "$f" "$XDIR/" && echo "baked $f"
+          done
+          # Static dlopen fallbacks want a libdl.
+          /opt/devkitpro/devkitA64/bin/aarch64-none-elf-ar rcs \
+            /opt/devkitpro/portlibs/switch/lib/libdl.a
+          ls /opt/switch-cross-include/ | head
+
+      - name: Build native tools (mesa_clc, vtn_bindgen2)
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/nxvk"
+          bash switch/build/build-native-tools.sh
+
+      - name: Cross-configure Mesa for Horizon
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/nxvk"
+          bash switch/build/configure-mesa.sh
+
+      - name: Build NVK archives
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/nxvk"
+          # The final libvulkan_nouveau.so link is expected to fail on Horizon;
+          # -k0 forces every lib*.a to build regardless. Per nxvk's README.
+          ninja -k0 -C switch/build/cross src/nouveau/vulkan/libvulkan_nouveau.so || true
+          echo "--- archives produced ---"
+          find switch/build/cross -name '*.a' | sort
+          test -f switch/build/cross/src/nouveau/vulkan/libnvk.a
+
+      - name: Package libvulkan.a
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/nxvk/switch/build/cross"
+          DKP=/opt/devkitpro
+          LD=$DKP/devkitA64/bin/aarch64-none-elf-ld
+          OBJCOPY=$DKP/devkitA64/bin/aarch64-none-elf-objcopy
+          AR=$DKP/devkitA64/bin/aarch64-none-elf-ar
+          NM=$DKP/devkitA64/bin/aarch64-none-elf-nm
+
+          # Support archives in dependency order, taken from nxvk's build-nro.sh.
+          ARCHIVES="
+            src/util/libmesa_util.a src/util/libmesa_util_simd.a src/util/blake3/libblake3.a
+            src/c11/impl/libmesa_util_c11.a
+            src/nouveau/compiler/libnak.a src/nouveau/compiler/libnak_rs.a
+            src/compiler/rust/libcompiler_c_helpers.a
+            src/nouveau/headers/libnvidia_headers_c.a
+            src/nouveau/nil/libnil.a src/nouveau/nil/liblibnil_format_table.a
+            src/compiler/nir/libnir.a src/compiler/libcompiler.a
+            src/nouveau/mme/libnouveau_mme.a src/nouveau/winsys/libnouveau_ws.a
+            src/vulkan/util/libvulkan_util.a src/compiler/spirv/libvtn.a
+            src/util/libxmlconfig.a"
+          present=""
+          for a in $ARCHIVES; do
+            if [ -f "$a" ]; then present="$present $a"; else echo "::warning::missing archive $a"; fi
+          done
+
+          # --start-group resolves the cyclic references between Mesa archives.
+          # libnvk must be whole-archived or the entrypoints get dropped.
+          # shellcheck disable=SC2086
+          "$LD" -r \
+            --whole-archive src/nouveau/vulkan/libnvk.a --no-whole-archive \
+            --start-group $present --end-group \
+            -o /tmp/libnvk_merged.o
+
+          echo "=== Vulkan entry points present in the merged object ==="
+          "$NM" --defined-only /tmp/libnvk_merged.o \
+            | grep -iE " (T|W) .*(vkGetInstanceProcAddr|vk_icdGetInstanceProcAddr|vk_icdNegotiate|vkCreateInstance|vkEnumerateInstance)" \
+            | sort -u | tee /tmp/entrypoints.txt || true
+
+          if grep -qE " (T|W) vkGetInstanceProcAddr$" /tmp/entrypoints.txt; then
+            echo "OK: standard vkGetInstanceProcAddr is exported - tico cores can link this directly."
+            KEEP="--keep-global-symbol=vkGetInstanceProcAddr"
+          else
+            echo "::warning::vkGetInstanceProcAddr not found; only the ICD entry point is available."
+            echo "::warning::A shim aliasing vkGetInstanceProcAddr -> vk_icdGetInstanceProcAddr will be required."
+            KEEP=""
+          fi
+
+          # Keep the ICD trio global too so Cemu-style consumers work as well.
+          # shellcheck disable=SC2086
+          "$OBJCOPY" \
+            $KEEP \
+            --keep-global-symbol=vk_icdGetInstanceProcAddr \
+            --keep-global-symbol=vk_icdNegotiateLoaderICDInterfaceVersion \
+            --keep-global-symbol=vk_icdGetPhysicalDeviceProcAddr \
+            /tmp/libnvk_merged.o /tmp/libnvk_local.o
+
+          mkdir -p "$GITHUB_WORKSPACE/out/lib" "$GITHUB_WORKSPACE/out/include"
+          "$AR" rcs "$GITHUB_WORKSPACE/out/lib/libvulkan.a" /tmp/libnvk_local.o
+          cp -r "$GITHUB_WORKSPACE/nxvk/include/vulkan" "$GITHUB_WORKSPACE/out/include/" 2>/dev/null || true
+          cp /tmp/libnvk_merged.o "$GITHUB_WORKSPACE/out/lib/libnvk_merged.o"
+          cp /tmp/entrypoints.txt "$GITHUB_WORKSPACE/out/entrypoints.txt"
+
+          cd "$GITHUB_WORKSPACE/out"
+          sha256sum lib/libvulkan.a | tee lib/libvulkan.a.sha256
+          ls -laR . | head -40
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## NVK build"
+            echo ""
+            echo '### Exported Vulkan entry points'
+            echo '```'
+            cat /tmp/entrypoints.txt 2>/dev/null || echo "(build did not reach this step)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload libvulkan.a
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvk-switch-libvulkan
+          path: out/
+          if-no-files-found: warn
+
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvk-meson-logs
+          path: |
+            nxvk/switch/build/cross/meson-logs/
+            nxvk/switch/build/native/meson-logs/
+          if-no-files-found: ignore

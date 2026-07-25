@@ -104,11 +104,21 @@ jobs:
           run-id: ${{ inputs.nvk_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Permanent source for the driver, so a build does not depend on an
+      # artifact from another run still existing.
+      - name: Fetch NVK driver from release
+        if: inputs.nvk_run_id == ''
+        run: |
+          set -eux
+          mkdir -p "$GITHUB_WORKSPACE/nvk/lib"
+          curl -fsSL -o "$GITHUB_WORKSPACE/nvk/lib/libvulkan.a"             https://github.com/jhuz0/nvk-switch/releases/download/nvk-switch-mesa-25.0.7-r1/libvulkan.a
+          ls -la "$GITHUB_WORKSPACE/nvk/lib/"
+
       - name: Provide Vulkan archive (stub fallback)
         id: vk
         run: |
           set -eux
-          # Real driver, built by the build-nvk workflow from nxvk.
+          # Real driver: either the artifact from a build-nvk run, or the release.
           if [ -f "$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" ]; then
             NM=/opt/devkitpro/devkitA64/bin/aarch64-none-elf-nm
             "$NM" --defined-only --extern-only "$GITHUB_WORKSPACE/nvk/lib/libvulkan.a" \

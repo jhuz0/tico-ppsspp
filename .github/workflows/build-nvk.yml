@@ -314,6 +314,19 @@ jobs:
           sha256sum lib/libvulkan.a | tee lib/libvulkan.a.sha256
           ls -laR . | head -40
 
+      # Standalone driver test: creates an instance, enumerates physical devices
+      # and does a headless fill/readback, logging to sdmc:/nvk_smoke.log. Lets us
+      # tell a broken driver apart from a broken consumer without involving tico.
+      - name: Build smoke test NRO
+        continue-on-error: true
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/nxvk"
+          bash switch/build/build-nro.sh nvk_smoke
+          mkdir -p "$GITHUB_WORKSPACE/out/smoke"
+          cp switch/smoke/out/nvk_smoke.nro "$GITHUB_WORKSPACE/out/smoke/"
+          ls -la "$GITHUB_WORKSPACE/out/smoke/"
+
       - name: Summary
         if: always()
         run: |

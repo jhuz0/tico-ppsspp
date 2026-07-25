@@ -48,6 +48,7 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "ppsspp_enable_wlan": "disabled",
     "ppsspp_adhoc_server": "socom.cc",
     "ppsspp_enable_adhoc_server": "disabled",
+    "ppsspp_adhoc_relay_mode": "Auto",
     "ppsspp_port_offset": "10000",
     "ppsspp_forced_first_connect": "enabled",
     "ppsspp_enable_network_chat": "disabled",
@@ -121,6 +122,17 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 	if (const std::string *value = FindOption(options, "ppsspp_adhoc_server")) {
 		if (!value->empty())
 			g_Config.sProAdhocServer = *value;
+	}
+	// Auto asks the server list whether the server relays packets
+	// (aemu_postoffice). That lookup needs to reach the list URL, so allow
+	// forcing it when it cannot.
+	if (const std::string *value = FindOption(options, "ppsspp_adhoc_relay_mode")) {
+		if (*value == "Always On" || *value == "AlwaysOn")
+			g_Config.iAdhocServerRelayMode = (int)AdhocServerRelayMode::AlwaysOn;
+		else if (*value == "Always Off" || *value == "AlwaysOff")
+			g_Config.iAdhocServerRelayMode = (int)AdhocServerRelayMode::AlwaysOff;
+		else
+			g_Config.iAdhocServerRelayMode = (int)AdhocServerRelayMode::Auto;
 	}
 	if (const std::string *value = FindOption(options, "ppsspp_port_offset")) {
 		g_Config.iPortOffset = std::clamp(OptionInt(*value, g_Config.iPortOffset), 0, 65535);

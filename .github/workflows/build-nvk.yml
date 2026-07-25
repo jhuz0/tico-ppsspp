@@ -276,6 +276,23 @@ jobs:
            * "Failed to load Vulkan base functions". Fill the two gaps here.
            */
           #include <string.h>
+          #include <stdlib.h>
+
+          /* NVK only exposes GPUs it considers conformant: discrete parts from
+           * Turing through Ada (nvk_physical_device_create). The Switch's GM20B
+           * is integrated Maxwell, so vkEnumeratePhysicalDevices returns zero
+           * devices and callers report "no supported GPU is available" unless
+           * this override is set. nxvk's own test harness sets it before bringup;
+           * do it here so consumers of this archive don't have to know.
+           *
+           * overwrite=0: a value already in the environment wins.
+           */
+          __attribute__((constructor))
+          static void nvk_switch_default_env(void)
+          {
+            setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 0);
+            setenv("MESA_SHADER_CACHE_DISABLE", "1", 0);
+          }
 
           typedef void (*PFN_vkVoidFunction)(void);
           typedef struct VkInstance_T *VkInstance;

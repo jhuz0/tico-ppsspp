@@ -464,6 +464,19 @@ void PpssppCoreConfig::Load() {
 	config_.Load();
 }
 
+void PpssppCoreConfig::PersistGeneratedMacAddress() {
+	// ApplyPpssppOptions() falls back to CreateRandMAC() when no MAC is set, but
+	// that draws a new one on every launch (srand(time(nullptr))). Ad hoc uses
+	// the MAC as the player identity, so a fresh one each boot makes the server
+	// and other players see a different person every session. Write it back once.
+	if (!config_.GetValue("ppsspp_mac_address").empty())
+		return;
+	if (g_Config.sMACAddress.length() != 17)
+		return;
+	config_.SetValue("ppsspp_mac_address", g_Config.sMACAddress);
+	config_.Save();
+}
+
 void PpssppCoreConfig::Apply(bool audioReady) const {
 	const DisplaySettings displaySettings = DisplaySettingsFromOptions(config_.Options());
 	ApplyPpssppOptions(config_.Options());

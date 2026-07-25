@@ -584,6 +584,7 @@ void InitializeConfig() {
 	config.Load();
 	g_state.inputConfig = LoadInputConfig(config.RawConfig());
 	config.Apply(g_state.audioReady);
+	config.PersistGeneratedMacAddress();
 	g_state.displaySettings = LoadPpssppDisplaySettings(g_state.log);
 	g_state.displaySettingsLoaded = true;
 	SavePpssppDisplaySettings(g_state.displaySettings, g_state.log);

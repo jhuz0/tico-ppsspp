@@ -33,7 +33,7 @@ constexpr int SaveStateSlotCount = 4;
 }  // namespace Ppsspp
 
 namespace Logging {
-constexpr bool Enabled = true;
+constexpr bool Enabled = false;
 }  // namespace Logging
 
 }  // namespace Tico

@@ -362,13 +362,37 @@ jobs:
         run: |
           set -eux
           cd "$GITHUB_WORKSPACE/nxvk"
-          bash switch/build/build-nro.sh nvk_smoke
-          mkdir -p "$GITHUB_WORKSPACE/out/smoke"
-          cp switch/smoke/out/nvk_smoke.nro "$GITHUB_WORKSPACE/out/smoke/"
-          # Keep the unstripped ELF so crash-report addresses can be symbolized
-          # with aarch64-none-elf-addr2line.
-          cp switch/smoke/out/obj/nvk_smoke.elf "$GITHUB_WORKSPACE/out/smoke/" || true
-          ls -la "$GITHUB_WORKSPACE/out/smoke/"
+          DKP=/opt/devkitpro
+          OUT="$GITHUB_WORKSPACE/out/smoke"
+          mkdir -p "$OUT"
+
+          # Deliberately NOT switch/build/build-nro.sh: its archive list omits
+          # libnouveau_codegen.a, so nvk_cg_* stay NULL and the test jumps to
+          # address 0 on Maxwell. Link the packaged archive instead, which is
+          # also what the cores consume - this tests the shipped artifact.
+          ARCH="-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE"
+          $DKP/devkitA64/bin/aarch64-none-elf-gcc -c switch/smoke/nvk_smoke.c \
+            -o /tmp/nvk_smoke.o $ARCH -ffunction-sections -fdata-sections -O2 \
+            -D__SWITCH__ -D_GNU_SOURCE -D_DEFAULT_SOURCE -DVK_USE_PLATFORM_VI_NN \
+            -I"$GITHUB_WORKSPACE/nxvk/include" -I$DKP/libnx/include \
+            -Wall -Wno-unused-function
+
+          $DKP/devkitA64/bin/aarch64-none-elf-g++ -specs=$DKP/libnx/switch.specs $ARCH \
+            -o /tmp/nvk_smoke.elf \
+            -Wl,--gc-sections -Wl,-u,vk_icdGetInstanceProcAddr \
+            -Wl,--allow-multiple-definition \
+            /tmp/nvk_smoke.o "$GITHUB_WORKSPACE/out/lib/libvulkan.a" \
+            -L$DKP/portlibs/switch/lib -L$DKP/libnx/lib \
+            -Wl,--start-group -lz -lnx -lc -lm -lstdc++ -pthread -Wl,--end-group
+
+          $DKP/tools/bin/nacptool --create "NVK smoke" "nxvk" "0.1.0" /tmp/nvk_smoke.nacp
+          $DKP/devkitA64/bin/aarch64-none-elf-strip /tmp/nvk_smoke.elf -o /tmp/nvk_smoke.stripped.elf
+          $DKP/tools/bin/elf2nro /tmp/nvk_smoke.stripped.elf "$OUT/nvk_smoke.nro" \
+            --icon=$DKP/libnx/default_icon.jpg --nacp=/tmp/nvk_smoke.nacp
+
+          # Unstripped ELF so crash-report offsets can be resolved with addr2line.
+          cp /tmp/nvk_smoke.elf "$OUT/nvk_smoke.elf"
+          ls -la "$OUT"
 
       - name: Summary
         if: always()

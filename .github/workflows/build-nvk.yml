@@ -59,8 +59,13 @@ jobs:
           apt-get install -y -qq --no-install-recommends git cmake build-essential python3
           rm -rf /tmp/spirv-src
           git clone --depth 1 -b v2024.4 https://github.com/KhronosGroup/SPIRV-Tools.git /tmp/spirv-src
-          git clone --depth 1 -b vulkan-sdk-1.3.290.0 \
-            https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spirv-src/external/spirv-headers
+          # Headers must match the tools revision exactly; SPIRV-Tools pins the
+          # commit it expects in DEPS. Guessing a tag gives missing spv::Op enums.
+          HEADERS_REV=$(grep -oE "spirv_headers_revision'\s*:\s*'[0-9a-f]{40}" /tmp/spirv-src/DEPS | grep -oE "[0-9a-f]{40}")
+          test -n "$HEADERS_REV"
+          echo "SPIRV-Headers revision: $HEADERS_REV"
+          git clone https://github.com/KhronosGroup/SPIRV-Headers.git /tmp/spirv-src/external/spirv-headers
+          git -C /tmp/spirv-src/external/spirv-headers checkout --detach "$HEADERS_REV"
           cmake -S /tmp/spirv-src -B /tmp/spirv-src/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/opt/spirv \

@@ -45,6 +45,17 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "ppsspp_map_stick_r": "R3",
     "ppsspp_right_stick_mode": "Face Buttons",
     "ppsspp_right_stick_threshold": "12000",
+    "ppsspp_enable_wlan": "disabled",
+    "ppsspp_adhoc_server": "socom.cc",
+    "ppsspp_enable_adhoc_server": "disabled",
+    "ppsspp_port_offset": "10000",
+    "ppsspp_forced_first_connect": "enabled",
+    "ppsspp_enable_network_chat": "disabled",
+    "ppsspp_enable_upnp": "disabled",
+    "ppsspp_upnp_use_original_port": "disabled",
+    "ppsspp_min_timeout": "0",
+    "ppsspp_mac_address": "",
+    "ppsspp_nickname": "",
     "ppsspp_internal_resolution": "480x272",
     "ppsspp_software_rendering": "disabled",
     "ppsspp_rendering_mode": "buffered",
@@ -98,6 +109,34 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 	applyBool("ppsspp_cheats", g_Config.bEnableCheats);
 	applyBool("ppsspp_analog_is_circular", g_Config.bAnalogIsCircular);
 	applyBool("ppsspp_memstick_inserted", g_Config.bMemStickInserted);
+
+	// Ad hoc multiplayer. Everything defaults to disabled, so leaving these out
+	// of the config keeps networking off exactly as before.
+	applyBool("ppsspp_enable_wlan", g_Config.bEnableWlan);
+	applyBool("ppsspp_enable_adhoc_server", g_Config.bEnableAdhocServer);
+	applyBool("ppsspp_enable_network_chat", g_Config.bEnableNetworkChat);
+	applyBool("ppsspp_enable_upnp", g_Config.bEnableUPnP);
+	applyBool("ppsspp_upnp_use_original_port", g_Config.bUPnPUseOriginalPort);
+	applyBool("ppsspp_forced_first_connect", g_Config.bForcedFirstConnect);
+	if (const std::string *value = FindOption(options, "ppsspp_adhoc_server")) {
+		if (!value->empty())
+			g_Config.sProAdhocServer = *value;
+	}
+	if (const std::string *value = FindOption(options, "ppsspp_port_offset")) {
+		g_Config.iPortOffset = std::clamp(OptionInt(*value, g_Config.iPortOffset), 0, 65535);
+	}
+	if (const std::string *value = FindOption(options, "ppsspp_min_timeout")) {
+		g_Config.iMinTimeout = std::max(0, OptionInt(*value, g_Config.iMinTimeout));
+	}
+	// Empty means "let PPSSPP generate one", which is the usual choice.
+	if (const std::string *value = FindOption(options, "ppsspp_mac_address")) {
+		if (!value->empty())
+			g_Config.sMACAddress = *value;
+	}
+	if (const std::string *value = FindOption(options, "ppsspp_nickname")) {
+		if (!value->empty())
+			g_Config.sNickName = *value;
+	}
 	applyBool("ppsspp_software_rendering", g_Config.bSoftwareRendering);
 	applyBool("ppsspp_cropto16x9", g_Config.bDisplayCropTo16x9);
 	applyBool("ppsspp_auto_frameskip", g_Config.bAutoFrameSkip);
@@ -384,10 +423,9 @@ void ApplySwitchRequiredConfig(bool audioReady) {
 	g_Config.bAchievementsEnable = false;
 	g_Config.bAchievementsEnableRAIntegration = false;
 	g_Config.bAchievementsSoundEffects = false;
-	g_Config.bEnableWlan = false;
-	g_Config.bEnableAdhocServer = false;
-	g_Config.bEnableNetworkChat = false;
-	g_Config.bEnableUPnP = false;
+	// Networking is left to ApplyPpssppOptions(), which runs before this and
+	// reads the core config. PPSSPP's own defaults keep every ad hoc setting
+	// off, so an install that does not opt in behaves exactly as before.
 	g_Config.sReportHost.clear();
 	g_Config.internalDataDirectory = Path(kPpssppDataRoot);
 	g_Config.memStickDirectory = Path(kPpssppDataRoot);

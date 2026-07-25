@@ -220,36 +220,59 @@ jobs:
           SHIM_OBJ=""
           if [ "$NEED_SHIM" = "1" ]; then
             cat > /tmp/vk_loaderless_shim.c <<'EOF'
+          /* The "loaderless" layer: what a Vulkan loader would normally provide.
+           *
+           * Mesa's ICD entry point answers, for a NULL instance, only
+           * CreateInstance / EnumerateInstance* / GetInstanceProcAddr
+           * (vk_instance.c: "if (instance == NULL) return NULL"), and it answers
+           * those straight out of the driver's entrypoint table. Anything the
+           * driver leaves unimplemented is a weak symbol resolving to NULL.
+           *
+           * Callers that link the driver directly still expect the full set of
+           * global commands up front. PPSSPP's VulkanLoad() requires
+           * vkCreateInstance, vkGetInstanceProcAddr, vkGetDeviceProcAddr,
+           * vkEnumerateInstanceExtensionProperties and
+           * vkEnumerateInstanceLayerProperties to be non-NULL, then reports
+           * "Failed to load Vulkan base functions". Fill the two gaps here.
+           */
           #include <string.h>
 
           typedef void (*PFN_vkVoidFunction)(void);
           typedef struct VkInstance_T *VkInstance;
           typedef struct VkDevice_T *VkDevice;
+          typedef int VkResult; /* VK_SUCCESS == 0 */
 
           PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+
+          /* Use the runtime's common implementation rather than
+           * nvk_GetDeviceProcAddr: NVK never defines the driver-prefixed one, so
+           * a strong reference to it does not link. */
           PFN_vkVoidFunction vk_common_GetDeviceProcAddr(VkDevice device, const char *pName);
+
+          /* NVK implements no EnumerateInstanceLayerProperties, and neither does
+           * Mesa's runtime -- layers are a loader concept. Without a loader there
+           * are none, so report an empty list, which is what the spec expects. */
+          static VkResult shim_EnumerateInstanceLayerProperties(unsigned int *pPropertyCount,
+                                                               void *pProperties)
+          {
+            (void)pProperties;
+            if (pPropertyCount != 0)
+              *pPropertyCount = 0;
+            return 0;
+          }
 
           PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
           {
             PFN_vkVoidFunction func = vk_icdGetInstanceProcAddr(instance, pName);
             if (func != 0)
               return func;
+            if (pName == 0)
+              return 0;
 
-            /* With a NULL instance an ICD only answers for CreateInstance,
-             * EnumerateInstance* and GetInstanceProcAddr (vk_instance.c:
-             * "if (instance == NULL) return NULL"). Callers bootstrapping
-             * without a loader still need vkGetDeviceProcAddr up front --
-             * PPSSPP's VulkanLoad() bails when it comes back NULL -- and a real
-             * loader would hand back its trampoline here. Supply the driver's
-             * own entry point instead; it behaves identically once a valid
-             * device is passed.
-             *
-             * Use the runtime's common implementation, not nvk_GetDeviceProcAddr:
-             * NVK never defines that one. Mesa declares the driver-prefixed
-             * entrypoints weak so unimplemented ones resolve to NULL and fall
-             * back to vk_common_*, and a strong reference to it fails to link. */
-            if (pName != 0 && strcmp(pName, "vkGetDeviceProcAddr") == 0)
+            if (strcmp(pName, "vkGetDeviceProcAddr") == 0)
               return (PFN_vkVoidFunction)vk_common_GetDeviceProcAddr;
+            if (strcmp(pName, "vkEnumerateInstanceLayerProperties") == 0)
+              return (PFN_vkVoidFunction)shim_EnumerateInstanceLayerProperties;
 
             return 0;
           }

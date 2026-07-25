@@ -360,6 +360,9 @@ jobs:
           bash switch/build/build-nro.sh nvk_smoke
           mkdir -p "$GITHUB_WORKSPACE/out/smoke"
           cp switch/smoke/out/nvk_smoke.nro "$GITHUB_WORKSPACE/out/smoke/"
+          # Keep the unstripped ELF so crash-report addresses can be symbolized
+          # with aarch64-none-elf-addr2line.
+          cp switch/smoke/out/obj/nvk_smoke.elf "$GITHUB_WORKSPACE/out/smoke/" || true
           ls -la "$GITHUB_WORKSPACE/out/smoke/"
 
       - name: Summary

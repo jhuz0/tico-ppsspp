@@ -145,6 +145,12 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 		if (!value->empty())
 			g_Config.sMACAddress = *value;
 	}
+	// PPSSPP normally fills this in while loading its own ini, which tico never
+	// does. Left empty, ad hoc sends 00:00:00:00:00:00 as the player identity and
+	// the server drops the connection on the first ping ("Error parsing mac
+	// address", then socket error 32).
+	if (g_Config.sMACAddress.length() != 17)
+		g_Config.sMACAddress = CreateRandMAC();
 	if (const std::string *value = FindOption(options, "ppsspp_nickname")) {
 		if (!value->empty())
 			g_Config.sNickName = *value;

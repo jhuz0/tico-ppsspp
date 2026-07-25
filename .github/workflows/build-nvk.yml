@@ -202,7 +202,10 @@ jobs:
           # template instantiations living in link-once section groups: localizing
           # those breaks the group semantics and the link fails with "defined in
           # discarded section" once --gc-sections runs.
-          KEEP_RE='^(vkGetInstanceProcAddr|vk_icdGetInstanceProcAddr|vk_icdNegotiateLoaderICDInterfaceVersion|vk_icdGetPhysicalDeviceProcAddr)$'
+          # nvk_GetDeviceProcAddr stays global: the shim needs it, because an ICD
+          # returns NULL for vkGetInstanceProcAddr(NULL, "vkGetDeviceProcAddr")
+          # and a real loader would supply the trampoline. See the shim below.
+          KEEP_RE='^(vkGetInstanceProcAddr|vk_icdGetInstanceProcAddr|vk_icdNegotiateLoaderICDInterfaceVersion|vk_icdGetPhysicalDeviceProcAddr|nvk_GetDeviceProcAddr)$'
           "$NM" --defined-only --extern-only /tmp/libnvk_merged.o \
             | awk '$2 ~ /^[TDBRtdbr]$/ && $3 != "" {print $3}' \
             | grep -vE "$KEEP_RE" | sort -u > /tmp/localize.txt
@@ -217,14 +220,33 @@ jobs:
           SHIM_OBJ=""
           if [ "$NEED_SHIM" = "1" ]; then
             cat > /tmp/vk_loaderless_shim.c <<'EOF'
+          #include <string.h>
+
           typedef void (*PFN_vkVoidFunction)(void);
           typedef struct VkInstance_T *VkInstance;
+          typedef struct VkDevice_T *VkDevice;
 
           PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+          PFN_vkVoidFunction nvk_GetDeviceProcAddr(VkDevice device, const char *pName);
 
           PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char *pName)
           {
-            return vk_icdGetInstanceProcAddr(instance, pName);
+            PFN_vkVoidFunction func = vk_icdGetInstanceProcAddr(instance, pName);
+            if (func != 0)
+              return func;
+
+            /* With a NULL instance an ICD only answers for CreateInstance,
+             * EnumerateInstance* and GetInstanceProcAddr (vk_instance.c:
+             * "if (instance == NULL) return NULL"). Callers bootstrapping
+             * without a loader still need vkGetDeviceProcAddr up front --
+             * PPSSPP's VulkanLoad() bails when it comes back NULL -- and a real
+             * loader would hand back its trampoline here. Supply the driver's
+             * own entry point instead; it behaves identically once a valid
+             * device is passed. */
+            if (pName != 0 && strcmp(pName, "vkGetDeviceProcAddr") == 0)
+              return (PFN_vkVoidFunction)nvk_GetDeviceProcAddr;
+
+            return 0;
           }
           EOF
             $DKP/devkitA64/bin/aarch64-none-elf-gcc \

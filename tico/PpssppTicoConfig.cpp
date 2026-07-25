@@ -43,7 +43,7 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "ppsspp_map_zr": "R2",
     "ppsspp_map_stick_l": "L3",
     "ppsspp_map_stick_r": "R3",
-    "ppsspp_right_stick_mode": "Face Buttons",
+    "ppsspp_right_stick_mode": "D-Pad",
     "ppsspp_right_stick_threshold": "12000",
     "ppsspp_internal_resolution": "480x272",
     "ppsspp_software_rendering": "disabled",

@@ -12,6 +12,7 @@ on:
   push:
     branches:
       - tico-input-mapping
+      - tico-adhoc
 
 jobs:
   build:

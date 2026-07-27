@@ -30,6 +30,9 @@ namespace {
 
 constexpr float kOverlayAnimDuration = 0.4f;
 constexpr float kQuickMenuWidth = 400.0f;
+constexpr size_t kChatMessageMaxLength = 60;   // proAdhoc truncates beyond this
+constexpr int kChatVisibleLines = 12;
+constexpr u64 kChatNavRepeatMs = 140;
 
 struct QuickMenuItem {
 	const char *labelKey;
@@ -38,6 +41,7 @@ struct QuickMenuItem {
 		LoadState,
 		Cheats,
 		Settings,
+		Chat,
 		ExitGame,
 	} action;
 };
@@ -47,6 +51,7 @@ constexpr QuickMenuItem kQuickMenuItems[] = {
 	{"emulator_load_state", QuickMenuItem::Action::LoadState},
 	{"emulator_cheats", QuickMenuItem::Action::Cheats},
 	{"emulator_settings", QuickMenuItem::Action::Settings},
+	{"emulator_chat", QuickMenuItem::Action::Chat},
 	{"emulator_exit_game", QuickMenuItem::Action::ExitGame},
 };
 
@@ -890,6 +895,9 @@ int Overlay::QuickMenuStorageIndex(int visibleIndex) const {
 		if (item.action == QuickMenuItem::Action::Cheats && !cheatsEnabled_) {
 			continue;
 		}
+		if (item.action == QuickMenuItem::Action::Chat && !chatEnabled_) {
+			continue;
+		}
 		if (visible == visibleIndex) {
 			return i;
 		}
@@ -902,9 +910,13 @@ int Overlay::ItemCount() const {
 	if (menu_ == Menu::Quick) {
 		int count = 0;
 		for (const QuickMenuItem &item : kQuickMenuItems) {
-			if (item.action != QuickMenuItem::Action::Cheats || cheatsEnabled_) {
-				count++;
+			if (item.action == QuickMenuItem::Action::Cheats && !cheatsEnabled_) {
+				continue;
 			}
+			if (item.action == QuickMenuItem::Action::Chat && !chatEnabled_) {
+				continue;
+			}
+			count++;
 		}
 		return count;
 	}
@@ -913,6 +925,9 @@ int Overlay::ItemCount() const {
 	}
 	if (menu_ == Menu::Cheats) {
 		return std::max(1, (int)cheats_.size());
+	}
+	if (menu_ == Menu::Chat) {
+		return std::max(1, (int)chatLog_.size());
 	}
 	return 2;
 }
@@ -968,6 +983,11 @@ void Overlay::ExecuteSelection() {
 		return;
 	}
 
+	if (menu_ == Menu::Chat) {
+		OpenChatComposer();
+		return;
+	}
+
 	if (menu_ == Menu::Cheats) {
 		if (cheats_.empty() || !cheats_[selection_].toggleable || cheats_[selection_].sourceIndex < 0) {
 			return;
@@ -991,6 +1011,11 @@ void Overlay::ExecuteSelection() {
 		cheatsLoadingDelayFrames_ = 1;
 		loaderTimer_ = 0.0f;
 		pendingCommand_ = {};
+	} else if (item.action == QuickMenuItem::Action::Chat) {
+		menu_ = Menu::Chat;
+		selection_ = 0;
+		chatScroll_ = 0;
+		animTimer_ = kOverlayAnimDuration;
 	} else if (item.action == QuickMenuItem::Action::Settings) {
 		menu_ = Menu::Settings;
 		selection_ = 0;
@@ -1103,6 +1128,15 @@ bool Overlay::HandleInput(u64 buttons, u64 pressed, int leftStickX, int leftStic
 			}
 			if (navRight) {
 				MoveCheatSelectionWrapped(selection_, cheats_, kCheatPageStep);
+			}
+		} else if (menu_ == Menu::Chat) {
+			// Up walks back through history; 0 keeps the newest line pinned.
+			const int maxScroll = std::max(0, (int)chatLog_.size() - kChatVisibleLines);
+			if (navUp) {
+				chatScroll_ = std::min(chatScroll_ + 1, maxScroll);
+			}
+			if (navDown) {
+				chatScroll_ = std::max(chatScroll_ - 1, 0);
 			}
 		} else {
 			if (navUp && itemCount > 0) {
@@ -1565,6 +1599,164 @@ void Overlay::DrawStatus(ImDrawList *drawList, ImVec2 displaySize, float scale, 
 	}
 }
 
+void Overlay::SetChatEnabled(bool enabled) {
+	if (chatEnabled_ == enabled) {
+		return;
+	}
+	chatEnabled_ = enabled;
+	if (!enabled) {
+		chatLog_.clear();
+		chatNotifications_.clear();
+		if (menu_ == Menu::Chat) {
+			menu_ = Menu::Quick;
+			selection_ = 0;
+		}
+	}
+}
+
+void Overlay::SetChatLog(std::vector<std::string> lines) {
+	chatLog_ = std::move(lines);
+	if (chatScroll_ > (int)chatLog_.size()) {
+		chatScroll_ = (int)chatLog_.size();
+	}
+}
+
+void Overlay::PushChatNotification(const std::string &line) {
+	if (line.empty()) {
+		return;
+	}
+	// Keep the stack short so a busy room cannot bury the screen.
+	if (chatNotifications_.size() >= 4) {
+		chatNotifications_.erase(chatNotifications_.begin());
+	}
+	ChatNotification notification;
+	notification.text = line;
+	chatNotifications_.push_back(std::move(notification));
+}
+
+void Overlay::OpenChatComposer() {
+	// Safe to block here: the overlay pauses emulation while it is visible.
+	std::string message;
+	if (!ShowKeyboard(tr("emulator_chat_send").c_str(), "", kChatMessageMaxLength, &message)) {
+		return;
+	}
+	sendChat(message);
+	// sendChat appends our own line, so refresh right away instead of waiting
+	// for the next poll.
+	SetChatLog(getChatLog());
+	chatScroll_ = 0;
+}
+
+void Overlay::DrawChat(ImDrawList *drawList, ImVec2 displaySize, float scale, float ease) {
+	const float panelWidth = std::min(760.0f * scale, displaySize.x - 96.0f * scale);
+	const float lineHeight = 30.0f * scale;
+	const float padding = 18.0f * scale;
+	const float panelHeight = lineHeight * (float)kChatVisibleLines + padding * 2.0f;
+	const float targetY = (displaySize.y - panelHeight) * 0.5f;
+	const float startY = displaySize.y + 100.0f * scale;
+	const float currentY = startY + (targetY - startY) * ease;
+	const ImVec2 min((displaySize.x - panelWidth) * 0.5f, currentY);
+	const ImVec2 max(min.x + panelWidth, min.y + panelHeight);
+	const int alpha = (int)(235.0f * ease);
+
+	drawList->AddRectFilled(min, max, IM_COL32(28, 28, 33, alpha), 16.0f * scale);
+	drawList->AddRect(min, max, IM_COL32(70, 70, 80, alpha), 16.0f * scale, 0, 1.5f * scale);
+
+	if (chatLog_.empty()) {
+		const std::string empty = tr("emulator_chat_empty");
+		const ImVec2 size = ImGui::CalcTextSize(empty.c_str());
+		drawList->AddText(ImVec2(min.x + (panelWidth - size.x) * 0.5f, min.y + (panelHeight - size.y) * 0.5f),
+			IM_COL32(150, 150, 160, alpha), empty.c_str());
+		return;
+	}
+
+	// chatScroll_ counts lines back from the newest, so 0 pins to the bottom.
+	const int total = (int)chatLog_.size();
+	int last = total - chatScroll_;
+	last = std::clamp(last, 1, total);
+	const int first = std::max(0, last - kChatVisibleLines);
+
+	float y = min.y + padding;
+	for (int i = first; i < last; ++i) {
+		const std::string &line = chatLog_[i];
+		// proAdhoc formats messages as "name: text"; anything else is a notice.
+		const size_t colon = line.find(':');
+		const bool isMessage = colon != std::string::npos && colon + 1 < line.size();
+		if (!isMessage) {
+			drawList->AddText(ImVec2(min.x + padding, y), IM_COL32(253, 216, 53, alpha), line.c_str());
+		} else {
+			const std::string name = line.substr(0, colon + 1);
+			const std::string text = line.substr(colon + 1);
+			const bool mine = !nickname_.empty() && line.compare(0, std::min(name.size() - 1, nickname_.size()), nickname_, 0, std::min(name.size() - 1, nickname_.size())) == 0;
+			const ImU32 nameColor = mine ? IM_COL32(229, 57, 53, alpha) : IM_COL32(41, 182, 246, alpha);
+			drawList->AddText(ImVec2(min.x + padding, y), nameColor, name.c_str());
+			const float nameWidth = ImGui::CalcTextSize(name.c_str()).x;
+			drawList->AddText(ImVec2(min.x + padding + nameWidth, y), IM_COL32(235, 235, 240, alpha), text.c_str());
+		}
+		y += lineHeight;
+	}
+
+	if (chatScroll_ > 0) {
+		const std::string marker = "v";
+		drawList->AddText(ImVec2(max.x - padding, max.y - padding - lineHeight),
+			IM_COL32(150, 150, 160, alpha), marker.c_str());
+	}
+}
+
+void Overlay::DrawChatAlerts(ImDrawList *drawList, ImVec2 displaySize, float scale, float deltaTime) {
+	if (chatNotifications_.empty()) {
+		return;
+	}
+
+	for (ChatNotification &notification : chatNotifications_) {
+		notification.timer += deltaTime;
+	}
+	chatNotifications_.erase(std::remove_if(chatNotifications_.begin(), chatNotifications_.end(),
+		[](const ChatNotification &notification) {
+			return notification.timer >= notification.duration;
+		}), chatNotifications_.end());
+	if (chatNotifications_.empty()) {
+		return;
+	}
+
+	// Bottom-left, away from the RetroAchievements alerts which default to the right.
+	const float margin = 16.0f * scale;
+	const float height = 34.0f * scale;
+	const float spacing = 6.0f * scale;
+	const float padding = 12.0f * scale;
+	const float maxWidth = std::min(520.0f * scale, displaySize.x - margin * 2.0f);
+
+	for (size_t i = 0; i < chatNotifications_.size(); ++i) {
+		const ChatNotification &notification = chatNotifications_[i];
+		float progress = 1.0f;
+		if (notification.timer < notification.slideIn) {
+			progress = EaseOutCubic(notification.timer / notification.slideIn);
+		} else if (notification.timer > notification.duration - notification.slideOut) {
+			progress = EaseOutCubic((notification.duration - notification.timer) / notification.slideOut);
+		}
+		progress = std::clamp(progress, 0.0f, 1.0f);
+		const int alpha = (int)(225.0f * progress);
+		if (alpha <= 0) {
+			continue;
+		}
+
+		const float textWidth = ImGui::CalcTextSize(notification.text.c_str()).x;
+		const float width = std::min(maxWidth, textWidth + padding * 2.0f);
+		const float stack = (height + spacing) * (float)(chatNotifications_.size() - 1 - i);
+		const float anchorY = displaySize.y - margin - height - stack;
+		const float slideX = -(width + margin) * (1.0f - progress);
+		const ImVec2 min(margin + slideX, anchorY);
+		const ImVec2 max(min.x + width, min.y + height);
+
+		drawList->AddRectFilled(min, max, IM_COL32(30, 30, 36, alpha), 8.0f * scale);
+		drawList->AddRect(min, max, IM_COL32(70, 70, 80, (int)(160.0f * progress)), 8.0f * scale, 0, 1.0f * scale);
+		drawList->PushClipRect(ImVec2(min.x + padding * 0.5f, min.y), ImVec2(max.x - padding * 0.5f, max.y), true);
+		const float textY = min.y + (height - ImGui::GetFontSize()) * 0.5f;
+		drawList->AddText(ImVec2(min.x + padding, textY), IM_COL32(235, 235, 240, alpha), notification.text.c_str());
+		drawList->PopClipRect();
+	}
+}
+
 void Overlay::DrawRAAlerts(Draw::DrawContext *draw, ImDrawList *drawList, ImVec2 displaySize, float scale, float deltaTime) {
 	auto &notifications = RetroAchievements().Notifications();
 	if (notifications.empty()) {
@@ -1708,7 +1900,11 @@ void Overlay::DrawUI(float width, float height, float deltaTime) {
 
 	DrawBackground(drawList, displaySize, ease);
 	DrawTitle(drawList, displaySize, scale, ease);
-	DrawMenu(drawList, displaySize, scale, ease);
+	if (menu_ == Menu::Chat) {
+		DrawChat(drawList, displaySize, scale, ease);
+	} else {
+		DrawMenu(drawList, displaySize, scale, ease);
+	}
 	DrawHelpers(drawList, displaySize, scale, ease);
 	DrawSocialArea(drawList, displaySize, scale, ease);
 	DrawStatus(drawList, displaySize, scale, ease, deltaTime);
@@ -1720,7 +1916,8 @@ void Overlay::Render(Draw::DrawContext *draw) {
 	}
 
 	const bool hasRAAlerts = !RetroAchievements().Notifications().empty();
-	if (!visible_ && !hasRAAlerts) {
+	const bool hasChatAlerts = !chatNotifications_.empty();
+	if (!visible_ && !hasRAAlerts && !hasChatAlerts) {
 		return;
 	}
 
@@ -1748,6 +1945,12 @@ void Overlay::Render(Draw::DrawContext *draw) {
 		DrawUI(width, height, io.DeltaTime);
 	}
 	DrawRAAlerts(draw, ImGui::GetForegroundDrawList(), ImVec2(width, height), scale, io.DeltaTime);
+	// Suppressed while the chat panel is open: the log is already on screen.
+	if (!(visible_ && menu_ == Menu::Chat)) {
+		DrawChatAlerts(ImGui::GetForegroundDrawList(), ImVec2(width, height), scale, io.DeltaTime);
+	} else {
+		chatNotifications_.clear();
+	}
 	ImGui::Render();
 
 	const Draw::RenderPassInfo overlayPass{

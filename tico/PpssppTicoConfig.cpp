@@ -51,7 +51,7 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "ppsspp_adhoc_relay_mode": "Always On",
     "ppsspp_port_offset": "10000",
     "ppsspp_forced_first_connect": "enabled",
-    "ppsspp_enable_network_chat": "disabled",
+    "ppsspp_enable_network_chat": "enabled",
     "ppsspp_enable_upnp": "disabled",
     "ppsspp_upnp_use_original_port": "disabled",
     "ppsspp_min_timeout": "0",

@@ -37,6 +37,7 @@
 #include "Core/CwCheat.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/FrameTiming.h"
+#include "Core/HLE/proAdhoc.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/HLE/sceDisplay.h"
 #include "Core/HW/StereoResampler.h"
@@ -124,6 +125,8 @@ struct RuntimeState {
 	std::array<bool, Ppsspp::SaveStateSlotCount> saveStateSlots{};
 	u64 lastSaveStateScanMs = 0;
 	u32 lastPspButtons = 0;
+	int lastChatChangeId = -1;
+	size_t lastChatLines = 0;
 	InputConfig inputConfig;
 	bool audioReady = false;
 	int audioSampleRate = kAudioSampleRate;
@@ -973,6 +976,12 @@ void RefreshCheatAvailability() {
 	g_state.overlay.SetCheatsEnabled(g_Config.bEnableCheats);
 }
 
+// Chat needs both the setting and a live ad hoc session; offering it offline
+// would only ever show "You're in Offline Mode".
+void RefreshChatAvailability() {
+	g_state.overlay.SetChatEnabled(g_Config.bEnableNetworkChat && g_Config.bEnableWlan);
+}
+
 bool ToggleCheatLine(int index) {
 	const std::string gameID = g_paramSFO.GetDiscID();
 	if (gameID.length() != 9) {
@@ -1313,6 +1322,7 @@ void PpssppRuntime::HandleInput(const FrameInput &input) {
 		RefreshSaveStateSlots(overlayTogglePressed);
 		if (overlayTogglePressed) {
 			RefreshCheatAvailability();
+			RefreshChatAvailability();
 		}
 	}
 	const bool inputConsumedByOverlay = g_state.overlay.HandleInput(input.buttons, input.pressed,
@@ -1333,6 +1343,31 @@ void PpssppRuntime::HandleInput(const FrameInput &input) {
 	}
 }
 
+// Mirrors PPSSPP's chat log into the overlay. GetChatChangeID() is bumped by the
+// FriendFinder thread, so this stays cheap when nothing is happening.
+void PollChat() {
+	if (!g_Config.bEnableNetworkChat) {
+		return;
+	}
+	const int changeId = GetChatChangeID();
+	if (changeId == g_state.lastChatChangeId) {
+		return;
+	}
+
+	std::vector<std::string> log = getChatLog();
+	const bool firstSync = g_state.lastChatChangeId < 0;
+	// Announce only what arrived since the last poll, and stay quiet on the
+	// first sync so joining a busy room does not spam the screen.
+	if (!firstSync && log.size() > g_state.lastChatLines) {
+		for (size_t i = g_state.lastChatLines; i < log.size(); ++i) {
+			g_state.overlay.PushChatNotification(log[i]);
+		}
+	}
+	g_state.lastChatChangeId = changeId;
+	g_state.lastChatLines = log.size();
+	g_state.overlay.SetChatLog(std::move(log));
+}
+
 void PpssppRuntime::RunFrame() {
 	if (!g_state.running || !g_state.booted) {
 		return;
@@ -1348,6 +1383,7 @@ void PpssppRuntime::RunFrame() {
 	}
 	DrainMainThreadQueue();
 	RetroAchievements().Idle();
+	PollChat();
 	PSP_UpdateDebugStats((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::DEBUG_STATS || g_Config.bLogFrameDrops);
 
 	const DisplayLayoutConfig &displayLayoutConfig = g_Config.GetDisplayLayoutConfig(DeviceOrientation::Landscape);

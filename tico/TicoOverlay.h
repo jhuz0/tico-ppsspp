@@ -41,6 +41,16 @@ enum class CheatMenuEntryKind {
 	Tip,
 };
 
+// A chat line that briefly slides in while playing, so messages are not missed
+// without opening the menu. Drawn even when the overlay itself is hidden.
+struct ChatNotification {
+	std::string text;
+	float timer = 0.0f;
+	float duration = 5.0f;
+	float slideIn = 0.3f;
+	float slideOut = 0.3f;
+};
+
 struct CheatMenuEntry {
 	std::string name;
 	bool enabled = false;
@@ -59,6 +69,10 @@ public:
 	void SetSaveStateInfo(int currentSlot, const std::array<bool, Ppsspp::SaveStateSlotCount> &slotInUse);
 	void SetCheatsEnabled(bool enabled);
 	void SetCheatInfo(bool enabled, bool available, const std::vector<CheatMenuEntry> &entries);
+	// Chat is only offered when the core config enables it and ad hoc is up.
+	void SetChatEnabled(bool enabled);
+	void SetChatLog(std::vector<std::string> lines);
+	void PushChatNotification(const std::string &line);
 	void ReloadDisplaySettings();
 
 	bool IsReady() const { return ready_; }
@@ -74,6 +88,7 @@ private:
 		SaveStates,
 		Cheats,
 		Settings,
+		Chat,
 	};
 
 	int ItemCount() const;
@@ -87,6 +102,9 @@ private:
 	void DrawHelpers(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
 	void DrawStatus(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease, float deltaTime);
 	void DrawRAAlerts(Draw::DrawContext *draw, ::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
+	void DrawChat(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
+	void DrawChatAlerts(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
+	void OpenChatComposer();
 	void CycleSetting(int direction);
 	void ApplyDisplaySettings(bool save);
 	void LoadSocial(Draw::DrawContext *draw);
@@ -119,6 +137,11 @@ private:
 	bool cheatsLoadCommandSent_ = false;
 	int cheatsLoadingDelayFrames_ = 0;
 	std::vector<CheatMenuEntry> cheats_;
+	bool chatEnabled_ = false;
+	std::vector<std::string> chatLog_;
+	std::vector<ChatNotification> chatNotifications_;
+	int chatScroll_ = 0;
+	u64 nextChatNavMs_ = 0;
 	u64 lastAnalogNavMs_ = 0;
 	u64 nextCheatVerticalNavMs_ = 0;
 	u64 nextCheatHorizontalNavMs_ = 0;

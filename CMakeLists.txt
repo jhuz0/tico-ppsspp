@@ -3036,6 +3036,8 @@ if(USE_LIBNX)
 		tico/TicoChainload.cpp
 		tico/TicoChainload.h
 		tico/TicoConfig.h
+		tico/TicoKeyboard.cpp
+		tico/TicoKeyboard.h
 		tico/TicoCoreConfig.cpp
 		tico/TicoCoreConfig.h
 		tico/TicoLogger.h

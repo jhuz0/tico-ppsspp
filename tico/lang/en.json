@@ -42,5 +42,8 @@
     "ra_leaderboard_failed": "Leaderboard Failed",
     "ra_leaderboard": "Leaderboard",
     "ra_offline": "Offline. Unlocks will sync when reconnected.",
-    "ra_reconnected": "Reconnected."
+    "ra_reconnected": "Reconnected.",
+    "emulator_chat": "Chat",
+    "emulator_chat_send": "Send message",
+    "emulator_chat_empty": "No messages yet"
 }

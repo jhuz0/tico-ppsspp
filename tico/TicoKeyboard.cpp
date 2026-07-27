@@ -1,4 +1,4 @@
-#include "tico/TicoKeyboard.h"
+#include "TicoKeyboard.h"
 
 #include "ppsspp_config.h"
 

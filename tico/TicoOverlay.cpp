@@ -1,9 +1,11 @@
 #include "TicoOverlay.h"
 
 #include "TicoConfig.h"
+#include "TicoKeyboard.h"
 #include "TicoRetroAchievements.h"
 #include "TicoTranslationManager.h"
 #include "TicoUtils.h"
+#include "Core/HLE/proAdhoc.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/Math/lin/matrix4x4.h"
 #include "Common/Render/ManagedTexture.h"

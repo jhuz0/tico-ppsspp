@@ -1200,6 +1200,22 @@ void ExecuteOverlayCommand(OverlayCommand command) {
 		ToggleCheatFromQuickMenu(command.slot);
 		return;
 	}
+	if (command.action == OverlayAction::ReloadCoreConfig) {
+		// Only re-apply what is safe to change with a game running. Graphics and
+		// CPU options, and anything read once when the ad hoc session started,
+		// are deliberately left alone until relaunch -- the menu marks those.
+		PpssppCoreConfig config(g_state.log);
+		config.Load();
+		g_state.inputConfig = LoadInputConfig(config.RawConfig());
+		ApplyChatAlertStyle(config.RawConfig());
+		// ApplyPpssppOptions() is too broad to run mid-game, so pick out the one
+		// networking toggle that is safe to flip live.
+		const std::string chatValue = config.RawConfig().GetValue("ppsspp_enable_network_chat", "disabled");
+		g_Config.bEnableNetworkChat = OptionEnabled(chatValue);
+		g_state.overlay.SetChatEnabled(g_Config.bEnableNetworkChat && g_Config.bEnableWlan);
+		Log("tico core config reloaded from overlay");
+		return;
+	}
 
 	const int slot = std::clamp(command.slot, 0, Ppsspp::SaveStateSlotCount - 1);
 	const Path statePath = GetLegacySaveStatePath(slot);

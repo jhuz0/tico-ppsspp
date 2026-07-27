@@ -6,6 +6,7 @@
 #include "TicoTranslationManager.h"
 #include "TicoUtils.h"
 #include "Core/HLE/proAdhoc.h"
+#include "Core/HLE/sceNetAdhoc.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/Math/lin/matrix4x4.h"
 #include "Common/Render/ManagedTexture.h"
@@ -44,6 +45,8 @@ struct QuickMenuItem {
 		Cheats,
 		Settings,
 		Chat,
+		Controls,
+		Online,
 		ExitGame,
 	} action;
 };
@@ -53,9 +56,59 @@ constexpr QuickMenuItem kQuickMenuItems[] = {
 	{"emulator_load_state", QuickMenuItem::Action::LoadState},
 	{"emulator_cheats", QuickMenuItem::Action::Cheats},
 	{"emulator_settings", QuickMenuItem::Action::Settings},
+	{"emulator_controls", QuickMenuItem::Action::Controls},
+	{"emulator_online", QuickMenuItem::Action::Online},
 	{"emulator_chat", QuickMenuItem::Action::Chat},
 	{"emulator_exit_game", QuickMenuItem::Action::ExitGame},
 };
+
+// Values accepted by ParsePspButtonMapping in PpssppTicoConfig.cpp.
+const char *const kPspButtonChoices[] = {
+	"Cross", "Circle", "Square", "Triangle",
+	"D-Pad Up", "D-Pad Down", "D-Pad Left", "D-Pad Right",
+	"Start", "Select", "L", "R", "L2", "R2", "L3", "R3", "None",
+};
+const char *const kRightStickChoices[] = { "Face Buttons", "D-Pad", "Analog", "Disabled" };
+const char *const kToggleChoices[] = { "enabled", "disabled" };
+const char *const kRelayChoices[] = { "Auto", "Always On", "Always Off" };
+const char *const kCornerChoices[] = { "Bottom Left", "Bottom Right", "Top Left", "Top Right" };
+
+#define CHOICE(arr) (arr), (int)(sizeof(arr) / sizeof((arr)[0]))
+
+const CoreSetting kControlSettings[] = {
+	{"ppsspp_right_stick_mode", "emulator_right_stick", SettingKind::Choice, CHOICE(kRightStickChoices)},
+	{"ppsspp_right_stick_threshold", "emulator_right_stick_threshold", SettingKind::Number, nullptr, 0, 4000, 30000, 1000},
+	{"ppsspp_map_a", "emulator_map_a", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_b", "emulator_map_b", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_x", "emulator_map_x", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_y", "emulator_map_y", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_l", "emulator_map_l", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_r", "emulator_map_r", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_zl", "emulator_map_zl", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_zr", "emulator_map_zr", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_plus", "emulator_map_plus", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_minus", "emulator_map_minus", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_stick_l", "emulator_map_stick_l", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_stick_r", "emulator_map_stick_r", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_dpad_up", "emulator_map_dpad_up", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_dpad_down", "emulator_map_dpad_down", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_dpad_left", "emulator_map_dpad_left", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+	{"ppsspp_map_dpad_right", "emulator_map_dpad_right", SettingKind::Choice, CHOICE(kPspButtonChoices)},
+};
+
+const CoreSetting kOnlineSettings[] = {
+	{"ppsspp_adhoc_server", "emulator_adhoc_server", SettingKind::ServerChoice, nullptr, 0, 0, 0, 1, true},
+	{"ppsspp_nickname", "emulator_nickname", SettingKind::Text, nullptr, 0, 0, 0, 1, true},
+	{"ppsspp_adhoc_relay_mode", "emulator_relay_mode", SettingKind::Choice, CHOICE(kRelayChoices), 0, 0, 1, true},
+	{"ppsspp_enable_wlan", "emulator_enable_wlan", SettingKind::Choice, CHOICE(kToggleChoices), 0, 0, 1, true},
+	{"ppsspp_enable_network_chat", "emulator_enable_chat", SettingKind::Choice, CHOICE(kToggleChoices)},
+	{"ppsspp_chat_alert_seconds", "emulator_chat_alert_seconds", SettingKind::Number, nullptr, 0, 1, 30, 1},
+	{"ppsspp_chat_alert_position", "emulator_chat_alert_position", SettingKind::Choice, CHOICE(kCornerChoices)},
+};
+
+#undef CHOICE
+
+constexpr int kSettingsVisibleRows = 9;
 
 constexpr int kAnalogNavThreshold = 16000;
 constexpr u64 kAnalogNavRepeatMs = 180;
@@ -931,6 +984,11 @@ int Overlay::ItemCount() const {
 	if (menu_ == Menu::Chat) {
 		return std::max(1, (int)chatLog_.size());
 	}
+	if (menu_ == Menu::Controls || menu_ == Menu::Online) {
+		int count = 0;
+		CurrentSettingTable(&count);
+		return std::max(1, count);
+	}
 	return 2;
 }
 
@@ -990,6 +1048,19 @@ void Overlay::ExecuteSelection() {
 		return;
 	}
 
+	if (menu_ == Menu::Controls || menu_ == Menu::Online) {
+		int count = 0;
+		const CoreSetting *table = CurrentSettingTable(&count);
+		if (table && selection_ >= 0 && selection_ < count) {
+			if (table[selection_].kind == SettingKind::Text) {
+				EditCoreSettingText(table[selection_]);
+			} else {
+				CycleCoreSetting(1);
+			}
+		}
+		return;
+	}
+
 	if (menu_ == Menu::Cheats) {
 		if (cheats_.empty() || !cheats_[selection_].toggleable || cheats_[selection_].sourceIndex < 0) {
 			return;
@@ -1013,6 +1084,17 @@ void Overlay::ExecuteSelection() {
 		cheatsLoadingDelayFrames_ = 1;
 		loaderTimer_ = 0.0f;
 		pendingCommand_ = {};
+	} else if (item.action == QuickMenuItem::Action::Controls) {
+		menu_ = Menu::Controls;
+		selection_ = 0;
+		settingsScroll_ = 0;
+		animTimer_ = kOverlayAnimDuration;
+	} else if (item.action == QuickMenuItem::Action::Online) {
+		RefreshServerChoices();
+		menu_ = Menu::Online;
+		selection_ = 0;
+		settingsScroll_ = 0;
+		animTimer_ = kOverlayAnimDuration;
 	} else if (item.action == QuickMenuItem::Action::Chat) {
 		menu_ = Menu::Chat;
 		selection_ = 0;
@@ -1146,6 +1228,14 @@ bool Overlay::HandleInput(u64 buttons, u64 pressed, int leftStickX, int leftStic
 			}
 			if (navDown && itemCount > 0) {
 				selection_ = (selection_ + 1) % itemCount;
+			}
+		}
+		if (menu_ == Menu::Controls || menu_ == Menu::Online) {
+			if (navLeft) {
+				CycleCoreSetting(-1);
+			}
+			if (navRight) {
+				CycleCoreSetting(1);
 			}
 		}
 		if (menu_ == Menu::Settings) {
@@ -1601,6 +1691,131 @@ void Overlay::DrawStatus(ImDrawList *drawList, ImVec2 displaySize, float scale, 
 	}
 }
 
+const CoreSetting *Overlay::CurrentSettingTable(int *count) const {
+	if (menu_ == Menu::Controls) {
+		*count = (int)(sizeof(kControlSettings) / sizeof(kControlSettings[0]));
+		return kControlSettings;
+	}
+	if (menu_ == Menu::Online) {
+		*count = (int)(sizeof(kOnlineSettings) / sizeof(kOnlineSettings[0]));
+		return kOnlineSettings;
+	}
+	*count = 0;
+	return nullptr;
+}
+
+std::string Overlay::SettingValue(const CoreSetting &setting) const {
+	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
+	config.Load();
+	std::string value = config.GetValue(setting.key);
+	if (setting.kind == SettingKind::ServerChoice) {
+		// Show the friendly name when the host is one we know about.
+		for (size_t i = 0; i < serverHosts_.size(); ++i) {
+			if (serverHosts_[i] == value) {
+				return serverLabels_[i];
+			}
+		}
+	}
+	if (value.empty()) {
+		return tr("emulator_not_set");
+	}
+	return value;
+}
+
+void Overlay::RefreshServerChoices() {
+	serverHosts_.clear();
+	serverLabels_.clear();
+	// Cache-only: this runs in-game, so never block on a download.
+	for (const AdhocServerListEntry &entry : AdhocGetServerList(AdhocLoadListMode::CacheOnlySync)) {
+		if (entry.hidden || entry.host.empty()) {
+			continue;
+		}
+		serverHosts_.push_back(entry.host);
+		std::string label = entry.name.empty() ? entry.host : entry.name;
+		if (!entry.location.empty()) {
+			label += " (" + entry.location + ")";
+		}
+		serverLabels_.push_back(label);
+	}
+}
+
+void Overlay::CycleCoreSetting(int direction) {
+	int count = 0;
+	const CoreSetting *table = CurrentSettingTable(&count);
+	if (!table || selection_ < 0 || selection_ >= count || direction == 0) {
+		return;
+	}
+	const CoreSetting &setting = table[selection_];
+
+	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
+	config.Load();
+	const std::string current = config.GetValue(setting.key);
+	std::string next;
+
+	switch (setting.kind) {
+	case SettingKind::Choice: {
+		int index = 0;
+		for (int i = 0; i < setting.choiceCount; ++i) {
+			if (current == setting.choices[i]) {
+				index = i;
+				break;
+			}
+		}
+		index = (index + direction + setting.choiceCount) % setting.choiceCount;
+		next = setting.choices[index];
+		break;
+	}
+	case SettingKind::Number: {
+		int value = OptionInt(current, setting.minValue);
+		value = std::clamp(value + direction * setting.step, setting.minValue, setting.maxValue);
+		next = std::to_string(value);
+		break;
+	}
+	case SettingKind::ServerChoice: {
+		if (serverHosts_.empty()) {
+			return;
+		}
+		int index = 0;
+		for (size_t i = 0; i < serverHosts_.size(); ++i) {
+			if (serverHosts_[i] == current) {
+				index = (int)i;
+				break;
+			}
+		}
+		index = (index + direction + (int)serverHosts_.size()) % (int)serverHosts_.size();
+		next = serverHosts_[index];
+		break;
+	}
+	case SettingKind::Text:
+		// Left/right does nothing for text; A opens the keyboard instead.
+		return;
+	}
+
+	if (next == current) {
+		return;
+	}
+	config.SetValue(setting.key, next);
+	config.Save();
+	LogMessage(log_, "tico setting %s = %s", setting.key, next.c_str());
+	// Let the runtime re-apply whatever is safe to change mid-session.
+	pendingCommand_ = { OverlayAction::ReloadCoreConfig, 0 };
+}
+
+void Overlay::EditCoreSettingText(const CoreSetting &setting) {
+	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
+	config.Load();
+	const std::string current = config.GetValue(setting.key);
+
+	std::string entered;
+	if (!ShowKeyboard(tr(setting.labelKey).c_str(), current.c_str(), 64, &entered)) {
+		return;
+	}
+	config.SetValue(setting.key, entered);
+	config.Save();
+	LogMessage(log_, "tico setting %s = %s", setting.key, entered.c_str());
+	pendingCommand_ = { OverlayAction::ReloadCoreConfig, 0 };
+}
+
 void Overlay::SetChatEnabled(bool enabled) {
 	if (chatEnabled_ == enabled) {
 		return;
@@ -1708,6 +1923,80 @@ void Overlay::DrawChat(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 		const std::string marker = "v";
 		drawList->AddText(ImVec2(max.x - padding, max.y - padding - lineHeight),
 			IM_COL32(150, 150, 160, alpha), marker.c_str());
+	}
+}
+
+void Overlay::DrawSettingsList(ImDrawList *drawList, ImVec2 displaySize, float scale, float ease) {
+	int count = 0;
+	const CoreSetting *table = CurrentSettingTable(&count);
+	if (!table || count == 0) {
+		return;
+	}
+
+	const float rowHeight = 46.0f * scale;
+	const float padding = 18.0f * scale;
+	const int visibleRows = std::min(count, kSettingsVisibleRows);
+	const float panelWidth = std::min(820.0f * scale, displaySize.x - 96.0f * scale);
+	const float panelHeight = rowHeight * (float)visibleRows + padding * 2.0f;
+	const float targetY = (displaySize.y - panelHeight) * 0.5f;
+	const float startY = displaySize.y + 100.0f * scale;
+	const float currentY = startY + (targetY - startY) * ease;
+	const ImVec2 min((displaySize.x - panelWidth) * 0.5f, currentY);
+	const ImVec2 max(min.x + panelWidth, min.y + panelHeight);
+	const int alpha = (int)(235.0f * ease);
+
+	drawList->AddRectFilled(min, max, IM_COL32(28, 28, 33, alpha), 16.0f * scale);
+	drawList->AddRect(min, max, IM_COL32(70, 70, 80, alpha), 16.0f * scale, 0, 1.5f * scale);
+
+	// Keep the highlighted row inside the window.
+	settingsScroll_ = std::clamp(settingsScroll_, 0, std::max(0, count - visibleRows));
+	if (selection_ < settingsScroll_) {
+		settingsScroll_ = selection_;
+	} else if (selection_ >= settingsScroll_ + visibleRows) {
+		settingsScroll_ = selection_ - visibleRows + 1;
+	}
+
+	float y = min.y + padding;
+	for (int row = 0; row < visibleRows; ++row) {
+		const int index = settingsScroll_ + row;
+		if (index >= count) {
+			break;
+		}
+		const CoreSetting &setting = table[index];
+		const bool selected = index == selection_;
+
+		if (selected) {
+			drawList->AddRectFilled(ImVec2(min.x + padding * 0.5f, y - 4.0f * scale),
+				ImVec2(max.x - padding * 0.5f, y + rowHeight - 8.0f * scale),
+				IM_COL32(60, 60, 72, alpha), 8.0f * scale);
+		}
+
+		std::string label = tr(setting.labelKey);
+		if (setting.needsRestart) {
+			label += " *";
+		}
+		drawList->AddText(ImVec2(min.x + padding, y),
+			IM_COL32(235, 235, 240, alpha), label.c_str());
+
+		const std::string value = SettingValue(setting);
+		const float valueWidth = ImGui::CalcTextSize(value.c_str()).x;
+		drawList->AddText(ImVec2(max.x - padding - valueWidth, y),
+			selected ? IM_COL32(41, 182, 246, alpha) : IM_COL32(170, 170, 180, alpha), value.c_str());
+		y += rowHeight;
+	}
+
+	// Footnote for the entries that only take effect on relaunch.
+	bool anyRestart = false;
+	for (int i = 0; i < count; ++i) {
+		if (table[i].needsRestart) {
+			anyRestart = true;
+			break;
+		}
+	}
+	if (anyRestart) {
+		const std::string note = "* " + tr("emulator_needs_restart");
+		drawList->AddText(ImVec2(min.x + padding, max.y + 8.0f * scale),
+			IM_COL32(150, 150, 160, alpha), note.c_str());
 	}
 }
 
@@ -1915,6 +2204,8 @@ void Overlay::DrawUI(float width, float height, float deltaTime) {
 	DrawTitle(drawList, displaySize, scale, ease);
 	if (menu_ == Menu::Chat) {
 		DrawChat(drawList, displaySize, scale, ease);
+	} else if (menu_ == Menu::Controls || menu_ == Menu::Online) {
+		DrawSettingsList(drawList, displaySize, scale, ease);
 	} else {
 		DrawMenu(drawList, displaySize, scale, ease);
 	}

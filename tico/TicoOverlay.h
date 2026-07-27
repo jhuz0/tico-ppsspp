@@ -28,6 +28,7 @@ enum class OverlayAction {
 	Reset,
 	LoadCheats,
 	ToggleCheat,
+	ReloadCoreConfig,
 };
 
 struct OverlayCommand {
@@ -39,6 +40,29 @@ enum class CheatMenuEntryKind {
 	Cheat,
 	Section,
 	Tip,
+};
+
+// A core-config key the quick menu can edit. Values are written straight back to
+// ppsspp.jsonc, so anything listed here stops needing a text editor.
+enum class SettingKind {
+	Choice,        // fixed list of values
+	Number,        // integer with min/max/step
+	Text,          // free text via the system keyboard
+	ServerChoice,  // populated at runtime from the ad hoc server list
+};
+
+struct CoreSetting {
+	const char *key;
+	const char *labelKey;
+	SettingKind kind;
+	const char *const *choices = nullptr;
+	int choiceCount = 0;
+	int minValue = 0;
+	int maxValue = 0;
+	int step = 1;
+	// Read once when the session starts, so changing it mid-game does nothing
+	// until the game is relaunched. Flagged in the UI rather than hidden.
+	bool needsRestart = false;
 };
 
 enum class ChatAlertPosition {
@@ -98,6 +122,8 @@ private:
 		Cheats,
 		Settings,
 		Chat,
+		Controls,
+		Online,
 	};
 
 	int ItemCount() const;
@@ -112,6 +138,12 @@ private:
 	void DrawStatus(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease, float deltaTime);
 	void DrawRAAlerts(Draw::DrawContext *draw, ::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
 	void DrawChat(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
+	void DrawSettingsList(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
+	const CoreSetting *CurrentSettingTable(int *count) const;
+	std::string SettingValue(const CoreSetting &setting) const;
+	void CycleCoreSetting(int direction);
+	void EditCoreSettingText(const CoreSetting &setting);
+	void RefreshServerChoices();
 	void DrawChatAlerts(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
 	void OpenChatComposer();
 	void CycleSetting(int direction);
@@ -147,6 +179,9 @@ private:
 	int cheatsLoadingDelayFrames_ = 0;
 	std::vector<CheatMenuEntry> cheats_;
 	bool chatEnabled_ = false;
+	std::vector<std::string> serverHosts_;
+	std::vector<std::string> serverLabels_;
+	int settingsScroll_ = 0;
 	float chatAlertDuration_ = 5.0f;
 	ChatAlertPosition chatAlertPosition_ = ChatAlertPosition::BottomLeft;
 	std::vector<std::string> chatLog_;

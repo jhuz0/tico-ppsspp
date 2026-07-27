@@ -74,5 +74,9 @@
     "emulator_chat_alert_seconds": "Alert duration (s)",
     "emulator_chat_alert_position": "Alert corner",
     "emulator_needs_restart": "Applies when the game is relaunched",
-    "emulator_not_set": "Not set"
+    "emulator_not_set": "Not set",
+    "emulator_add_server": "Add server",
+    "emulator_remove_server": "Remove this server",
+    "emulator_add_server_host": "Server address",
+    "emulator_add_server_name": "Name for this server"
 }

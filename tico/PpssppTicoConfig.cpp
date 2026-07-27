@@ -47,6 +47,7 @@ constexpr const char *kDefaultPpssppCoreConfig = R"json({
     "ppsspp_right_stick_threshold": "12000",
     "ppsspp_enable_wlan": "enabled",
     "ppsspp_adhoc_server": "jpa36a7.glddns.com",
+    "ppsspp_custom_servers": "",
     "ppsspp_enable_adhoc_server": "enabled",
     "ppsspp_adhoc_relay_mode": "Always On",
     "ppsspp_port_offset": "10000",
@@ -124,6 +125,26 @@ void ApplyPpssppOptions(const std::map<std::string, std::string> &options) {
 	if (const std::string *value = FindOption(options, "ppsspp_adhoc_server")) {
 		if (!value->empty())
 			g_Config.sProAdhocServer = *value;
+	}
+	// Custom servers are not in the downloaded list, so tell the relay detection
+	// about them. Assume they relay: practically every current server does, and
+	// ppsspp_adhoc_relay_mode can still force it either way.
+	g_Config.vCustomAdhocServerListWithRelay.clear();
+	if (const std::string *value = FindOption(options, "ppsspp_custom_servers")) {
+		size_t start = 0;
+		while (start <= value->size()) {
+			const size_t end = value->find(';', start);
+			const std::string entry = value->substr(start, end == std::string::npos ? std::string::npos : end - start);
+			const size_t bar = entry.find('|');
+			const std::string host = bar == std::string::npos ? entry : entry.substr(0, bar);
+			if (!host.empty()) {
+				g_Config.vCustomAdhocServerListWithRelay.push_back(host);
+			}
+			if (end == std::string::npos) {
+				break;
+			}
+			start = end + 1;
+		}
 	}
 	// Auto asks the server list whether the server relays packets
 	// (aemu_postoffice). That lookup needs to reach the list URL, so allow

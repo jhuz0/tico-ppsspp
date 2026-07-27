@@ -49,6 +49,7 @@ enum class SettingKind {
 	Number,        // integer with min/max/step
 	Text,          // free text via the system keyboard
 	ServerChoice,  // populated at runtime from the ad hoc server list
+	Action,        // runs something instead of holding a value
 };
 
 struct CoreSetting {
@@ -122,6 +123,7 @@ private:
 		Cheats,
 		Settings,
 		Chat,
+		Display,
 		Controls,
 		Online,
 	};
@@ -140,10 +142,16 @@ private:
 	void DrawChat(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
 	void DrawSettingsList(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
 	const CoreSetting *CurrentSettingTable(int *count) const;
+	int SettingStorageIndex(int visibleIndex) const;
+	int VisibleSettingCount() const;
 	std::string SettingValue(const CoreSetting &setting) const;
 	void CycleCoreSetting(int direction);
 	void EditCoreSettingText(const CoreSetting &setting);
 	void RefreshServerChoices();
+	void AddCustomServer();
+	void RemoveSelectedCustomServer();
+	bool SelectedServerIsCustom() const;
+	Menu ParentMenu(Menu menu) const;
 	void DrawChatAlerts(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
 	void OpenChatComposer();
 	void CycleSetting(int direction);
@@ -181,6 +189,7 @@ private:
 	bool chatEnabled_ = false;
 	std::vector<std::string> serverHosts_;
 	std::vector<std::string> serverLabels_;
+	std::vector<bool> serverIsCustom_;
 	int settingsScroll_ = 0;
 	float chatAlertDuration_ = 5.0f;
 	ChatAlertPosition chatAlertPosition_ = ChatAlertPosition::BottomLeft;

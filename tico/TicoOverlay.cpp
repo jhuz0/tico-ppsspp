@@ -56,8 +56,6 @@ constexpr QuickMenuItem kQuickMenuItems[] = {
 	{"emulator_load_state", QuickMenuItem::Action::LoadState},
 	{"emulator_cheats", QuickMenuItem::Action::Cheats},
 	{"emulator_settings", QuickMenuItem::Action::Settings},
-	{"emulator_controls", QuickMenuItem::Action::Controls},
-	{"emulator_online", QuickMenuItem::Action::Online},
 	{"emulator_chat", QuickMenuItem::Action::Chat},
 	{"emulator_exit_game", QuickMenuItem::Action::ExitGame},
 };
@@ -104,6 +102,8 @@ const CoreSetting kOnlineSettings[] = {
 	{"ppsspp_enable_network_chat", "emulator_enable_chat", SettingKind::Choice, CHOICE(kToggleChoices)},
 	{"ppsspp_chat_alert_seconds", "emulator_chat_alert_seconds", SettingKind::Number, nullptr, 0, 1, 30, 1},
 	{"ppsspp_chat_alert_position", "emulator_chat_alert_position", SettingKind::Choice, CHOICE(kCornerChoices)},
+	{"@add_server", "emulator_add_server", SettingKind::Action},
+	{"@remove_server", "emulator_remove_server", SettingKind::Action},
 };
 
 #undef CHOICE
@@ -985,11 +985,13 @@ int Overlay::ItemCount() const {
 		return std::max(1, (int)chatLog_.size());
 	}
 	if (menu_ == Menu::Controls || menu_ == Menu::Online) {
-		int count = 0;
-		CurrentSettingTable(&count);
-		return std::max(1, count);
+		return std::max(1, VisibleSettingCount());
 	}
-	return 2;
+	if (menu_ == Menu::Settings) {
+		return 3;  // Display, Controls, Online
+	}
+	return 2;  // Menu::Display
+
 }
 
 void Overlay::ApplyDisplaySettings(bool save) {
@@ -1029,6 +1031,25 @@ void Overlay::ExecuteSelection() {
 	}
 
 	if (menu_ == Menu::Settings) {
+		if (selection_ == 0) {
+			menu_ = Menu::Display;
+			selection_ = 0;
+			settingsSelection_ = 0;
+		} else if (selection_ == 1) {
+			menu_ = Menu::Controls;
+			selection_ = 0;
+			settingsScroll_ = 0;
+		} else {
+			RefreshServerChoices();
+			menu_ = Menu::Online;
+			selection_ = 0;
+			settingsScroll_ = 0;
+		}
+		animTimer_ = kOverlayAnimDuration;
+		return;
+	}
+
+	if (menu_ == Menu::Display) {
 		CycleSetting(1);
 		return;
 	}
@@ -1051,12 +1072,21 @@ void Overlay::ExecuteSelection() {
 	if (menu_ == Menu::Controls || menu_ == Menu::Online) {
 		int count = 0;
 		const CoreSetting *table = CurrentSettingTable(&count);
-		if (table && selection_ >= 0 && selection_ < count) {
-			if (table[selection_].kind == SettingKind::Text) {
-				EditCoreSettingText(table[selection_]);
-			} else {
-				CycleCoreSetting(1);
+		if (!table || selection_ < 0 || selection_ >= VisibleSettingCount()) {
+			return;
+		}
+		const CoreSetting &setting = table[SettingStorageIndex(selection_)];
+		if (setting.kind == SettingKind::Action) {
+			if (strcmp(setting.key, "@add_server") == 0) {
+				AddCustomServer();
+			} else if (strcmp(setting.key, "@remove_server") == 0) {
+				RemoveSelectedCustomServer();
+				selection_ = std::min(selection_, std::max(0, VisibleSettingCount() - 1));
 			}
+		} else if (setting.kind == SettingKind::Text) {
+			EditCoreSettingText(setting);
+		} else {
+			CycleCoreSetting(1);
 		}
 		return;
 	}
@@ -1084,17 +1114,6 @@ void Overlay::ExecuteSelection() {
 		cheatsLoadingDelayFrames_ = 1;
 		loaderTimer_ = 0.0f;
 		pendingCommand_ = {};
-	} else if (item.action == QuickMenuItem::Action::Controls) {
-		menu_ = Menu::Controls;
-		selection_ = 0;
-		settingsScroll_ = 0;
-		animTimer_ = kOverlayAnimDuration;
-	} else if (item.action == QuickMenuItem::Action::Online) {
-		RefreshServerChoices();
-		menu_ = Menu::Online;
-		selection_ = 0;
-		settingsScroll_ = 0;
-		animTimer_ = kOverlayAnimDuration;
 	} else if (item.action == QuickMenuItem::Action::Chat) {
 		menu_ = Menu::Chat;
 		selection_ = 0;
@@ -1238,7 +1257,7 @@ bool Overlay::HandleInput(u64 buttons, u64 pressed, int leftStickX, int leftStic
 				CycleCoreSetting(1);
 			}
 		}
-		if (menu_ == Menu::Settings) {
+		if (menu_ == Menu::Display) {
 			settingsSelection_ = selection_;
 			if (navLeft) {
 				CycleSetting(-1);
@@ -1257,9 +1276,10 @@ bool Overlay::HandleInput(u64 buttons, u64 pressed, int leftStickX, int leftStic
 		}
 		if (pressed & HidNpadButton_B) {
 			if (menu_ != Menu::Quick) {
-				menu_ = Menu::Quick;
+				menu_ = ParentMenu(menu_);
 				selection_ = 0;
 				settingsSelection_ = 0;
+				settingsScroll_ = 0;
 				animTimer_ = kOverlayAnimDuration;
 			} else {
 				SetVisible(false);
@@ -1456,6 +1476,16 @@ void Overlay::DrawMenu(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 				labelText = cheats_[i].name.empty() ? tr("emulator_cheat") : cheats_[i].name;
 				drawCheckbox = cheats_[i].toggleable;
 				checkboxChecked = cheats_[i].enabled;
+			}
+			label = labelText.c_str();
+		} else if (menu_ == Menu::Settings) {
+			// Hub: each row opens a submenu, so there is no value to show.
+			if (i == 0) {
+				labelText = tr("emulator_display");
+			} else if (i == 1) {
+				labelText = tr("emulator_controls");
+			} else {
+				labelText = tr("emulator_online");
 			}
 			label = labelText.c_str();
 		} else {
@@ -1691,6 +1721,65 @@ void Overlay::DrawStatus(ImDrawList *drawList, ImVec2 displaySize, float scale, 
 	}
 }
 
+// Custom servers live in one config string: "host|Name;host|Name". Separators
+// are stripped from user input so a stray character cannot corrupt the list.
+std::string SanitizeServerField(const std::string &value) {
+	std::string clean;
+	clean.reserve(value.size());
+	for (char c : value) {
+		if (c != ';' && c != '|') {
+			clean.push_back(c);
+		}
+	}
+	return clean;
+}
+
+std::vector<std::pair<std::string, std::string>> ParseCustomServers(const std::string &packed) {
+	std::vector<std::pair<std::string, std::string>> out;
+	size_t start = 0;
+	while (start <= packed.size()) {
+		const size_t end = packed.find(';', start);
+		const std::string entry = packed.substr(start, end == std::string::npos ? std::string::npos : end - start);
+		if (!entry.empty()) {
+			const size_t bar = entry.find('|');
+			std::string host = bar == std::string::npos ? entry : entry.substr(0, bar);
+			std::string name = bar == std::string::npos ? entry : entry.substr(bar + 1);
+			if (!host.empty()) {
+				out.emplace_back(host, name.empty() ? host : name);
+			}
+		}
+		if (end == std::string::npos) {
+			break;
+		}
+		start = end + 1;
+	}
+	return out;
+}
+
+std::string PackCustomServers(const std::vector<std::pair<std::string, std::string>> &servers) {
+	std::string packed;
+	for (const auto &server : servers) {
+		if (!packed.empty()) {
+			packed.push_back(';');
+		}
+		packed += server.first;
+		packed.push_back('|');
+		packed += server.second;
+	}
+	return packed;
+}
+
+Overlay::Menu Overlay::ParentMenu(Menu menu) const {
+	switch (menu) {
+	case Menu::Display:
+	case Menu::Controls:
+	case Menu::Online:
+		return Menu::Settings;
+	default:
+		return Menu::Quick;
+	}
+}
+
 const CoreSetting *Overlay::CurrentSettingTable(int *count) const {
 	if (menu_ == Menu::Controls) {
 		*count = (int)(sizeof(kControlSettings) / sizeof(kControlSettings[0]));
@@ -1702,6 +1791,117 @@ const CoreSetting *Overlay::CurrentSettingTable(int *count) const {
 	}
 	*count = 0;
 	return nullptr;
+}
+
+bool Overlay::SelectedServerIsCustom() const {
+	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
+	config.Load();
+	const std::string current = config.GetValue("ppsspp_adhoc_server");
+	for (const auto &server : ParseCustomServers(config.GetValue("ppsspp_custom_servers"))) {
+		if (server.first == current) {
+			return true;
+		}
+	}
+	return false;
+}
+
+int Overlay::VisibleSettingCount() const {
+	int count = 0;
+	const CoreSetting *table = CurrentSettingTable(&count);
+	if (!table) {
+		return 0;
+	}
+	int visible = 0;
+	for (int i = 0; i < count; ++i) {
+		if (strcmp(table[i].key, "@remove_server") == 0 && !SelectedServerIsCustom()) {
+			continue;
+		}
+		visible++;
+	}
+	return visible;
+}
+
+int Overlay::SettingStorageIndex(int visibleIndex) const {
+	int count = 0;
+	const CoreSetting *table = CurrentSettingTable(&count);
+	if (!table) {
+		return 0;
+	}
+	int visible = 0;
+	for (int i = 0; i < count; ++i) {
+		if (strcmp(table[i].key, "@remove_server") == 0 && !SelectedServerIsCustom()) {
+			continue;
+		}
+		if (visible == visibleIndex) {
+			return i;
+		}
+		visible++;
+	}
+	return 0;
+}
+
+void Overlay::AddCustomServer() {
+	std::string host;
+	if (!ShowKeyboard(tr("emulator_add_server_host").c_str(), "", 64, &host)) {
+		return;
+	}
+	host = SanitizeServerField(host);
+	if (host.empty()) {
+		return;
+	}
+	std::string name;
+	if (!ShowKeyboard(tr("emulator_add_server_name").c_str(), host.c_str(), 32, &name)) {
+		name = host;
+	}
+	name = SanitizeServerField(name);
+	if (name.empty()) {
+		name = host;
+	}
+
+	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
+	config.Load();
+	auto servers = ParseCustomServers(config.GetValue("ppsspp_custom_servers"));
+	for (auto &server : servers) {
+		if (server.first == host) {
+			server.second = name;  // already known: just rename it
+			config.SetValue("ppsspp_custom_servers", PackCustomServers(servers));
+			config.SetValue("ppsspp_adhoc_server", host);
+			config.Save();
+			RefreshServerChoices();
+			pendingCommand_ = { OverlayAction::ReloadCoreConfig, 0 };
+			return;
+		}
+	}
+	servers.emplace_back(host, name);
+	config.SetValue("ppsspp_custom_servers", PackCustomServers(servers));
+	// Select what was just added, which is almost certainly the intent.
+	config.SetValue("ppsspp_adhoc_server", host);
+	config.Save();
+	LogMessage(log_, "tico custom server added %s (%s)", host.c_str(), name.c_str());
+	RefreshServerChoices();
+	pendingCommand_ = { OverlayAction::ReloadCoreConfig, 0 };
+}
+
+void Overlay::RemoveSelectedCustomServer() {
+	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
+	config.Load();
+	const std::string current = config.GetValue("ppsspp_adhoc_server");
+	auto servers = ParseCustomServers(config.GetValue("ppsspp_custom_servers"));
+	const size_t before = servers.size();
+	servers.erase(std::remove_if(servers.begin(), servers.end(),
+		[&current](const std::pair<std::string, std::string> &server) {
+			return server.first == current;
+		}), servers.end());
+	if (servers.size() == before) {
+		return;
+	}
+	config.SetValue("ppsspp_custom_servers", PackCustomServers(servers));
+	// ppsspp_adhoc_server is left pointing at the removed host on purpose: it
+	// still works, and silently moving someone to a different server is worse.
+	config.Save();
+	LogMessage(log_, "tico custom server removed %s", current.c_str());
+	RefreshServerChoices();
+	pendingCommand_ = { OverlayAction::ReloadCoreConfig, 0 };
 }
 
 std::string Overlay::SettingValue(const CoreSetting &setting) const {
@@ -1725,9 +1925,24 @@ std::string Overlay::SettingValue(const CoreSetting &setting) const {
 void Overlay::RefreshServerChoices() {
 	serverHosts_.clear();
 	serverLabels_.clear();
+	serverIsCustom_.clear();
+
+	// Yours first, marked, so they are easy to find among the official ones.
+	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
+	config.Load();
+	for (const auto &server : ParseCustomServers(config.GetValue("ppsspp_custom_servers"))) {
+		serverHosts_.push_back(server.first);
+		serverLabels_.push_back("* " + server.second);
+		serverIsCustom_.push_back(true);
+	}
+
 	// Cache-only: this runs in-game, so never block on a download.
 	for (const AdhocServerListEntry &entry : AdhocGetServerList(AdhocLoadListMode::CacheOnlySync)) {
 		if (entry.hidden || entry.host.empty()) {
+			continue;
+		}
+		// Skip anything already listed as a custom entry.
+		if (std::find(serverHosts_.begin(), serverHosts_.end(), entry.host) != serverHosts_.end()) {
 			continue;
 		}
 		serverHosts_.push_back(entry.host);
@@ -1736,16 +1951,20 @@ void Overlay::RefreshServerChoices() {
 			label += " (" + entry.location + ")";
 		}
 		serverLabels_.push_back(label);
+		serverIsCustom_.push_back(false);
 	}
 }
 
 void Overlay::CycleCoreSetting(int direction) {
 	int count = 0;
 	const CoreSetting *table = CurrentSettingTable(&count);
-	if (!table || selection_ < 0 || selection_ >= count || direction == 0) {
+	if (!table || selection_ < 0 || selection_ >= VisibleSettingCount() || direction == 0) {
 		return;
 	}
-	const CoreSetting &setting = table[selection_];
+	const CoreSetting &setting = table[SettingStorageIndex(selection_)];
+	if (setting.kind == SettingKind::Action) {
+		return;
+	}
 
 	CoreConfig config("ppsspp", Paths::PpssppCoreConfig, "{}", log_);
 	config.Load();
@@ -1933,9 +2152,13 @@ void Overlay::DrawSettingsList(ImDrawList *drawList, ImVec2 displaySize, float s
 		return;
 	}
 
+	const int total = VisibleSettingCount();
+	if (total == 0) {
+		return;
+	}
 	const float rowHeight = 46.0f * scale;
 	const float padding = 18.0f * scale;
-	const int visibleRows = std::min(count, kSettingsVisibleRows);
+	const int visibleRows = std::min(total, kSettingsVisibleRows);
 	const float panelWidth = std::min(820.0f * scale, displaySize.x - 96.0f * scale);
 	const float panelHeight = rowHeight * (float)visibleRows + padding * 2.0f;
 	const float targetY = (displaySize.y - panelHeight) * 0.5f;
@@ -1949,7 +2172,7 @@ void Overlay::DrawSettingsList(ImDrawList *drawList, ImVec2 displaySize, float s
 	drawList->AddRect(min, max, IM_COL32(70, 70, 80, alpha), 16.0f * scale, 0, 1.5f * scale);
 
 	// Keep the highlighted row inside the window.
-	settingsScroll_ = std::clamp(settingsScroll_, 0, std::max(0, count - visibleRows));
+	settingsScroll_ = std::clamp(settingsScroll_, 0, std::max(0, total - visibleRows));
 	if (selection_ < settingsScroll_) {
 		settingsScroll_ = selection_;
 	} else if (selection_ >= settingsScroll_ + visibleRows) {
@@ -1958,12 +2181,12 @@ void Overlay::DrawSettingsList(ImDrawList *drawList, ImVec2 displaySize, float s
 
 	float y = min.y + padding;
 	for (int row = 0; row < visibleRows; ++row) {
-		const int index = settingsScroll_ + row;
-		if (index >= count) {
+		const int visibleIndex = settingsScroll_ + row;
+		if (visibleIndex >= total) {
 			break;
 		}
-		const CoreSetting &setting = table[index];
-		const bool selected = index == selection_;
+		const CoreSetting &setting = table[SettingStorageIndex(visibleIndex)];
+		const bool selected = visibleIndex == selection_;
 
 		if (selected) {
 			drawList->AddRectFilled(ImVec2(min.x + padding * 0.5f, y - 4.0f * scale),
@@ -1978,10 +2201,12 @@ void Overlay::DrawSettingsList(ImDrawList *drawList, ImVec2 displaySize, float s
 		drawList->AddText(ImVec2(min.x + padding, y),
 			IM_COL32(235, 235, 240, alpha), label.c_str());
 
-		const std::string value = SettingValue(setting);
-		const float valueWidth = ImGui::CalcTextSize(value.c_str()).x;
-		drawList->AddText(ImVec2(max.x - padding - valueWidth, y),
-			selected ? IM_COL32(41, 182, 246, alpha) : IM_COL32(170, 170, 180, alpha), value.c_str());
+		if (setting.kind != SettingKind::Action) {
+			const std::string value = SettingValue(setting);
+			const float valueWidth = ImGui::CalcTextSize(value.c_str()).x;
+			drawList->AddText(ImVec2(max.x - padding - valueWidth, y),
+				selected ? IM_COL32(41, 182, 246, alpha) : IM_COL32(170, 170, 180, alpha), value.c_str());
+		}
 		y += rowHeight;
 	}
 

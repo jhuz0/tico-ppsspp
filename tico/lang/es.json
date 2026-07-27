@@ -74,5 +74,9 @@
     "emulator_chat_alert_seconds": "Duracion del aviso (s)",
     "emulator_chat_alert_position": "Esquina del aviso",
     "emulator_needs_restart": "Se aplica al reiniciar el juego",
-    "emulator_not_set": "Sin definir"
+    "emulator_not_set": "Sin definir",
+    "emulator_add_server": "Anadir servidor",
+    "emulator_remove_server": "Quitar este servidor",
+    "emulator_add_server_host": "Direccion del servidor",
+    "emulator_add_server_name": "Nombre para este servidor"
 }

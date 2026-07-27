@@ -1616,6 +1616,11 @@ void Overlay::SetChatEnabled(bool enabled) {
 	}
 }
 
+void Overlay::SetChatAlertStyle(float durationSeconds, ChatAlertPosition position) {
+	chatAlertDuration_ = std::clamp(durationSeconds, 1.0f, 30.0f);
+	chatAlertPosition_ = position;
+}
+
 void Overlay::SetChatLog(std::vector<std::string> lines) {
 	chatLog_ = std::move(lines);
 	if (chatScroll_ > (int)chatLog_.size()) {
@@ -1633,6 +1638,7 @@ void Overlay::PushChatNotification(const std::string &line) {
 	}
 	ChatNotification notification;
 	notification.text = line;
+	notification.duration = chatAlertDuration_;
 	chatNotifications_.push_back(std::move(notification));
 }
 
@@ -1721,7 +1727,10 @@ void Overlay::DrawChatAlerts(ImDrawList *drawList, ImVec2 displaySize, float sca
 		return;
 	}
 
-	// Bottom-left, away from the RetroAchievements alerts which default to the right.
+	const bool isTop = chatAlertPosition_ == ChatAlertPosition::TopLeft ||
+		chatAlertPosition_ == ChatAlertPosition::TopRight;
+	const bool isRight = chatAlertPosition_ == ChatAlertPosition::TopRight ||
+		chatAlertPosition_ == ChatAlertPosition::BottomRight;
 	const float margin = 16.0f * scale;
 	const float height = 34.0f * scale;
 	const float spacing = 6.0f * scale;
@@ -1745,9 +1754,11 @@ void Overlay::DrawChatAlerts(ImDrawList *drawList, ImVec2 displaySize, float sca
 		const float textWidth = ImGui::CalcTextSize(notification.text.c_str()).x;
 		const float width = std::min(maxWidth, textWidth + padding * 2.0f);
 		const float stack = (height + spacing) * (float)(chatNotifications_.size() - 1 - i);
-		const float anchorY = displaySize.y - margin - height - stack;
-		const float slideX = -(width + margin) * (1.0f - progress);
-		const ImVec2 min(margin + slideX, anchorY);
+		const float anchorY = isTop ? margin + stack : displaySize.y - margin - height - stack;
+		const float anchorX = isRight ? displaySize.x - width - margin : margin;
+		// Slide in from whichever edge is nearer.
+		const float slideX = isRight ? (width + margin) * (1.0f - progress) : -(width + margin) * (1.0f - progress);
+		const ImVec2 min(anchorX + slideX, anchorY);
 		const ImVec2 max(min.x + width, min.y + height);
 
 		drawList->AddRectFilled(min, max, IM_COL32(30, 30, 36, alpha), 8.0f * scale);

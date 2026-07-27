@@ -581,6 +581,20 @@ void UpdateDisplayMode() {
 	}
 }
 
+void ApplyChatAlertStyle(const CoreConfig &config) {
+	const float seconds = OptionFloat(config.GetValue("ppsspp_chat_alert_seconds", "5"), 5.0f);
+	const std::string where = config.GetValue("ppsspp_chat_alert_position", "Bottom Left");
+	ChatAlertPosition position = ChatAlertPosition::BottomLeft;
+	if (where == "Top Left") {
+		position = ChatAlertPosition::TopLeft;
+	} else if (where == "Top Right") {
+		position = ChatAlertPosition::TopRight;
+	} else if (where == "Bottom Right") {
+		position = ChatAlertPosition::BottomRight;
+	}
+	g_state.overlay.SetChatAlertStyle(seconds, position);
+}
+
 void InitializeConfig() {
 	g_Config.RestoreDefaults(RestoreSettingsBits::SETTINGS | RestoreSettingsBits::CONTROLS, true);
 	PpssppCoreConfig config(g_state.log);
@@ -588,6 +602,7 @@ void InitializeConfig() {
 	g_state.inputConfig = LoadInputConfig(config.RawConfig());
 	config.Apply(g_state.audioReady);
 	config.PersistGeneratedMacAddress();
+	ApplyChatAlertStyle(config.RawConfig());
 	g_state.displaySettings = LoadPpssppDisplaySettings(g_state.log);
 	g_state.displaySettingsLoaded = true;
 	SavePpssppDisplaySettings(g_state.displaySettings, g_state.log);

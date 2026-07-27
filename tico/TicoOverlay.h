@@ -41,6 +41,13 @@ enum class CheatMenuEntryKind {
 	Tip,
 };
 
+enum class ChatAlertPosition {
+	TopLeft,
+	TopRight,
+	BottomLeft,
+	BottomRight,
+};
+
 // A chat line that briefly slides in while playing, so messages are not missed
 // without opening the menu. Drawn even when the overlay itself is hidden.
 struct ChatNotification {
@@ -71,6 +78,8 @@ public:
 	void SetCheatInfo(bool enabled, bool available, const std::vector<CheatMenuEntry> &entries);
 	// Chat is only offered when the core config enables it and ad hoc is up.
 	void SetChatEnabled(bool enabled);
+	// Seconds a message stays on screen, and which corner it slides in from.
+	void SetChatAlertStyle(float durationSeconds, ChatAlertPosition position);
 	void SetChatLog(std::vector<std::string> lines);
 	void PushChatNotification(const std::string &line);
 	void ReloadDisplaySettings();
@@ -138,6 +147,8 @@ private:
 	int cheatsLoadingDelayFrames_ = 0;
 	std::vector<CheatMenuEntry> cheats_;
 	bool chatEnabled_ = false;
+	float chatAlertDuration_ = 5.0f;
+	ChatAlertPosition chatAlertPosition_ = ChatAlertPosition::BottomLeft;
 	std::vector<std::string> chatLog_;
 	std::vector<ChatNotification> chatNotifications_;
 	int chatScroll_ = 0;

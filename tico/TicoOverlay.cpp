@@ -366,6 +366,39 @@ std::string TruncateToWidth(ImFont *font, float fontSize, const std::string &tex
 	return "...";
 }
 
+// Breaks text on word boundaries so every piece fits. The first piece may get a
+// narrower budget than the rest, which is how a message shares its opening row
+// with the sender name and then hangs indented underneath.
+std::vector<std::string> WrapToWidth(ImFont *font, float fontSize, const std::string &text,
+	float firstWidth, float restWidth) {
+	std::vector<std::string> lines;
+	if (!font || text.empty()) {
+		lines.push_back(text);
+		return lines;
+	}
+
+	const float scale = font->FontSize > 0.0f ? fontSize / font->FontSize : 1.0f;
+	const char *cursor = text.c_str();
+	const char *end = cursor + text.size();
+	while (cursor < end) {
+		const float width = std::max(lines.empty() ? firstWidth : restWidth, 1.0f);
+		const char *wrap = font->CalcWordWrapPositionA(scale, cursor, end, width);
+		// A single glyph wider than the box would otherwise loop forever.
+		if (wrap <= cursor) {
+			wrap = cursor + 1;
+		}
+		lines.emplace_back(cursor, wrap);
+		cursor = wrap;
+		while (cursor < end && *cursor == ' ') {
+			++cursor;
+		}
+	}
+	if (lines.empty()) {
+		lines.emplace_back();
+	}
+	return lines;
+}
+
 u64 CurrentTimeMs() {
 	const u64 tickFreq = armGetSystemTickFreq();
 	const u64 ticksPerMs = tickFreq / 1000;
@@ -838,6 +871,11 @@ void Overlay::Shutdown() {
 	ready_ = false;
 	visible_ = false;
 	comboDown_ = false;
+	dockComboDown_ = false;
+	chatDocked_ = false;
+	chatDockAnim_ = 0.0f;
+	chatDisplayLines_.clear();
+	chatDisplayWidth_ = 0.0f;
 	exitRequested_ = false;
 	menu_ = Menu::Quick;
 	selection_ = 0;
@@ -1146,6 +1184,25 @@ bool Overlay::HandleInput(u64 buttons, u64 pressed, int leftStickX, int leftStic
 	}
 	comboDown_ = comboDown;
 
+	// ZL+ZR docks the chat over a running game. ZL and ZR map to CTRL_L2/CTRL_R2,
+	// which no PSP game reads, so the combo is free unless the player remapped
+	// them. The pause overlay owns the screen, so it wins when both could apply.
+	const bool dockCombo = (buttons & HidNpadButton_ZL) && (buttons & HidNpadButton_ZR);
+	if (dockCombo && !dockComboDown_ && !visible_ && chatEnabled_) {
+		chatDocked_ = !chatDocked_;
+		chatDockAnim_ = 0.0f;
+		chatScroll_ = 0;
+	}
+	dockComboDown_ = dockCombo;
+	if (visible_) {
+		chatDocked_ = false;
+	}
+
+	if (!visible_ && chatDocked_) {
+		HandleChatInput(buttons, pressed);
+		return true;
+	}
+
 	if (visible_) {
 		const int itemCount = ItemCount();
 		bool navUp = (pressed & HidNpadButton_Up) != 0;
@@ -1234,7 +1291,9 @@ bool Overlay::HandleInput(u64 buttons, u64 pressed, int leftStickX, int leftStic
 			}
 		} else if (menu_ == Menu::Chat) {
 			// Up walks back through history; 0 keeps the newest line pinned.
-			const int maxScroll = std::max(0, (int)chatLog_.size() - kChatVisibleLines);
+			// Counted in wrapped rows, not log entries: one long message can
+			// occupy several rows.
+			const int maxScroll = std::max(0, ChatRowCount() - kChatVisibleLines);
 			if (navUp) {
 				chatScroll_ = std::min(chatScroll_ + 1, maxScroll);
 			}
@@ -1287,7 +1346,39 @@ bool Overlay::HandleInput(u64 buttons, u64 pressed, int leftStickX, int leftStic
 		}
 	}
 
-	return wasVisible || visible_ || comboDown;
+	return wasVisible || visible_ || comboDown || chatDocked_ || dockCombo;
+}
+
+// Input while the docked panel is up. Everything is swallowed: the game keeps
+// running, but the player is reading rather than playing, and a stray D-Pad
+// press reaching the game would be worse than standing still.
+bool Overlay::HandleChatInput(u64 buttons, u64 pressed) {
+	const int maxScroll = std::max(0, ChatRowCount() - 1);
+	const u64 nowMs = CurrentTimeMs();
+	const bool holdUp = (buttons & HidNpadButton_Up) != 0;
+	const bool holdDown = (buttons & HidNpadButton_Down) != 0;
+	const bool repeat = nextChatNavMs_ != 0 && nowMs >= nextChatNavMs_;
+
+	if ((pressed & HidNpadButton_Up) || (holdUp && repeat)) {
+		chatScroll_ = std::min(chatScroll_ + 1, maxScroll);
+		nextChatNavMs_ = nowMs + kChatNavRepeatMs;
+	} else if ((pressed & HidNpadButton_Down) || (holdDown && repeat)) {
+		chatScroll_ = std::max(chatScroll_ - 1, 0);
+		nextChatNavMs_ = nowMs + kChatNavRepeatMs;
+	} else if (!holdUp && !holdDown) {
+		nextChatNavMs_ = 0;
+	} else if (nextChatNavMs_ == 0) {
+		nextChatNavMs_ = nowMs + kChatNavRepeatMs;
+	}
+
+	if (pressed & HidNpadButton_A) {
+		OpenChatComposer();
+	}
+	if (pressed & HidNpadButton_B) {
+		chatDocked_ = false;
+		chatDockAnim_ = 0.0f;
+	}
+	return true;
 }
 
 void Overlay::UpdateBattery(float deltaTime) {
@@ -2043,6 +2134,9 @@ void Overlay::SetChatEnabled(bool enabled) {
 	if (!enabled) {
 		chatLog_.clear();
 		chatNotifications_.clear();
+		chatDisplayLines_.clear();
+		chatDocked_ = false;
+		chatDockAnim_ = 0.0f;
 		if (menu_ == Menu::Chat) {
 			menu_ = Menu::Quick;
 			selection_ = 0;
@@ -2057,6 +2151,9 @@ void Overlay::SetChatAlertStyle(float durationSeconds, ChatAlertPosition positio
 
 void Overlay::SetChatLog(std::vector<std::string> lines) {
 	chatLog_ = std::move(lines);
+	// Invalidates the wrapped rows; the scroll clamp uses those, so it has to
+	// wait until they are rebuilt on the next draw.
+	++chatLogVersion_;
 	if (chatScroll_ > (int)chatLog_.size()) {
 		chatScroll_ = (int)chatLog_.size();
 	}
@@ -2077,7 +2174,12 @@ void Overlay::PushChatNotification(const std::string &line) {
 }
 
 void Overlay::OpenChatComposer() {
-	// Safe to block here: the overlay pauses emulation while it is visible.
+	// swkbd is a system applet and blocks this thread, which is the same thread
+	// that runs the emulator. From the pause overlay that costs nothing, since
+	// emulation is already stopped. From the docked panel the game is running
+	// and will freeze until the keyboard closes: unavoidable without drawing our
+	// own keyboard, and the reason composing is a deliberate button press rather
+	// than something the panel does on its own.
 	std::string message;
 	if (!ShowKeyboard(tr("emulator_chat_send").c_str(), "", kChatMessageMaxLength, &message)) {
 		return;
@@ -2087,6 +2189,113 @@ void Overlay::OpenChatComposer() {
 	// for the next poll.
 	SetChatLog(getChatLog());
 	chatScroll_ = 0;
+}
+
+void Overlay::RebuildChatDisplayLines(float wrapWidth, float indent) {
+	chatDisplayLines_.clear();
+	chatDisplayWidth_ = wrapWidth;
+	chatDisplayVersion_ = chatLogVersion_;
+
+	ImFont *font = ImGui::GetFont();
+	const float fontSize = ImGui::GetFontSize();
+	for (const std::string &line : chatLog_) {
+		// proAdhoc formats messages as "name: text"; anything else is a notice.
+		const size_t colon = line.find(':');
+		const bool isMessage = colon != std::string::npos && colon + 1 < line.size();
+		if (!isMessage) {
+			for (std::string &piece : WrapToWidth(font, fontSize, line, wrapWidth, wrapWidth)) {
+				ChatDisplayLine row;
+				row.text = std::move(piece);
+				row.notice = true;
+				chatDisplayLines_.push_back(std::move(row));
+			}
+			continue;
+		}
+
+		const std::string name = line.substr(0, colon + 1);
+		const std::string text = line.substr(colon + 1);
+		const size_t compare = std::min(name.size() - 1, chatNickname_.size());
+		const bool mine = !chatNickname_.empty() && compare > 0 &&
+			line.compare(0, compare, chatNickname_, 0, compare) == 0;
+		const float nameWidth = font ? font->CalcTextSizeA(fontSize, 10000.0f, 0.0f, name.c_str()).x : 0.0f;
+
+		std::vector<std::string> pieces = WrapToWidth(font, fontSize, text,
+			wrapWidth - nameWidth, wrapWidth - indent);
+		for (size_t i = 0; i < pieces.size(); ++i) {
+			ChatDisplayLine row;
+			if (i == 0) {
+				row.name = name;
+			}
+			row.text = std::move(pieces[i]);
+			row.mine = mine;
+			chatDisplayLines_.push_back(std::move(row));
+		}
+	}
+}
+
+void Overlay::DrawChatMessages(ImDrawList *drawList, ImVec2 boxMin, ImVec2 boxMax, float scale, int alpha) {
+	const float padding = 18.0f * scale;
+	const float lineHeight = 30.0f * scale;
+	const float indent = 24.0f * scale;
+	const ImVec2 contentMin(boxMin.x + padding, boxMin.y + padding);
+	const ImVec2 contentMax(boxMax.x - padding, boxMax.y - padding);
+	const float wrapWidth = contentMax.x - contentMin.x;
+	if (wrapWidth <= 0.0f || contentMax.y <= contentMin.y) {
+		return;
+	}
+
+	if (chatLog_.empty()) {
+		const std::string empty = tr("emulator_chat_empty");
+		const ImVec2 size = ImGui::CalcTextSize(empty.c_str());
+		drawList->AddText(ImVec2(contentMin.x + (wrapWidth - size.x) * 0.5f,
+			contentMin.y + (contentMax.y - contentMin.y - size.y) * 0.5f),
+			IM_COL32(150, 150, 160, alpha), empty.c_str());
+		return;
+	}
+
+	if (chatDisplayWidth_ != wrapWidth || chatDisplayVersion_ != chatLogVersion_) {
+		RebuildChatDisplayLines(wrapWidth, indent);
+	}
+
+	const int capacity = std::max(1, (int)((contentMax.y - contentMin.y) / lineHeight));
+	const int total = (int)chatDisplayLines_.size();
+	// std::clamp below needs lo <= hi, which only holds with at least one row.
+	if (total <= 0) {
+		return;
+	}
+	// chatScroll_ counts rows back from the newest, so 0 pins to the bottom.
+	int last = std::clamp(total - chatScroll_, 1, total);
+	const int first = std::max(0, last - capacity);
+
+	// Anchored to the bottom edge, so a short log sits where the newest message
+	// always is instead of drifting with the row count.
+	drawList->PushClipRect(contentMin, contentMax, true);
+	float y = contentMax.y - (float)(last - first) * lineHeight;
+	for (int i = first; i < last; ++i) {
+		const ChatDisplayLine &row = chatDisplayLines_[i];
+		float x = contentMin.x;
+		if (row.notice) {
+			drawList->AddText(ImVec2(x, y), IM_COL32(253, 216, 53, alpha), row.text.c_str());
+		} else {
+			if (!row.name.empty()) {
+				const ImU32 nameColor = row.mine ? IM_COL32(229, 57, 53, alpha) : IM_COL32(41, 182, 246, alpha);
+				drawList->AddText(ImVec2(x, y), nameColor, row.name.c_str());
+				x += ImGui::CalcTextSize(row.name.c_str()).x;
+			} else {
+				x += indent;
+			}
+			if (!row.text.empty()) {
+				drawList->AddText(ImVec2(x, y), IM_COL32(235, 235, 240, alpha), row.text.c_str());
+			}
+		}
+		y += lineHeight;
+	}
+	drawList->PopClipRect();
+
+	if (chatScroll_ > 0) {
+		drawList->AddText(ImVec2(contentMax.x - 12.0f * scale, contentMax.y - lineHeight),
+			IM_COL32(150, 150, 160, alpha), "v");
+	}
 }
 
 void Overlay::DrawChat(ImDrawList *drawList, ImVec2 displaySize, float scale, float ease) {
@@ -2103,46 +2312,50 @@ void Overlay::DrawChat(ImDrawList *drawList, ImVec2 displaySize, float scale, fl
 
 	drawList->AddRectFilled(min, max, IM_COL32(28, 28, 33, alpha), 16.0f * scale);
 	drawList->AddRect(min, max, IM_COL32(70, 70, 80, alpha), 16.0f * scale, 0, 1.5f * scale);
+	DrawChatMessages(drawList, min, max, scale, alpha);
+}
 
-	if (chatLog_.empty()) {
-		const std::string empty = tr("emulator_chat_empty");
-		const ImVec2 size = ImGui::CalcTextSize(empty.c_str());
-		drawList->AddText(ImVec2(min.x + (panelWidth - size.x) * 0.5f, min.y + (panelHeight - size.y) * 0.5f),
-			IM_COL32(150, 150, 160, alpha), empty.c_str());
+void Overlay::DrawChatDock(ImDrawList *drawList, ImVec2 displaySize, float scale, float ease) {
+	const float margin = 16.0f * scale;
+	const float lineHeight = 30.0f * scale;
+	const float padding = 18.0f * scale;
+	const float panelWidth = displaySize.x * 0.55f;
+	const float panelHeight = displaySize.y * 0.45f;
+	const float targetY = displaySize.y - margin - panelHeight;
+	// Slides up from below the bottom edge.
+	const float startY = displaySize.y + margin;
+	const ImVec2 min(margin, startY + (targetY - startY) * ease);
+	const ImVec2 max(min.x + panelWidth, min.y + panelHeight);
+	const int alpha = (int)(224.0f * ease);
+
+	drawList->AddRectFilled(min, max, IM_COL32(28, 28, 33, alpha), 16.0f * scale);
+	drawList->AddRect(min, max, IM_COL32(70, 70, 80, alpha), 16.0f * scale, 0, 1.5f * scale);
+
+	std::string header = tr("emulator_chat");
+	if (!chatServer_.empty()) {
+		header += " - " + chatServer_;
+	}
+	if (!chatNickname_.empty()) {
+		header += " - " + chatNickname_;
+	}
+	drawList->PushClipRect(ImVec2(min.x + padding, min.y), ImVec2(max.x - padding, max.y), true);
+	drawList->AddText(ImVec2(min.x + padding, min.y + padding * 0.5f),
+		IM_COL32(150, 150, 160, alpha), header.c_str());
+	drawList->AddText(ImVec2(min.x + padding, max.y - padding * 0.5f - lineHeight),
+		IM_COL32(120, 120, 130, alpha), tr("emulator_chat_dock_help").c_str());
+	drawList->PopClipRect();
+
+	DrawChatMessages(drawList, ImVec2(min.x, min.y + lineHeight), ImVec2(max.x, max.y - lineHeight), scale, alpha);
+}
+
+void Overlay::SetChatIdentity(const std::string &server, const std::string &nickname) {
+	if (chatServer_ == server && chatNickname_ == nickname) {
 		return;
 	}
-
-	// chatScroll_ counts lines back from the newest, so 0 pins to the bottom.
-	const int total = (int)chatLog_.size();
-	int last = total - chatScroll_;
-	last = std::clamp(last, 1, total);
-	const int first = std::max(0, last - kChatVisibleLines);
-
-	float y = min.y + padding;
-	for (int i = first; i < last; ++i) {
-		const std::string &line = chatLog_[i];
-		// proAdhoc formats messages as "name: text"; anything else is a notice.
-		const size_t colon = line.find(':');
-		const bool isMessage = colon != std::string::npos && colon + 1 < line.size();
-		if (!isMessage) {
-			drawList->AddText(ImVec2(min.x + padding, y), IM_COL32(253, 216, 53, alpha), line.c_str());
-		} else {
-			const std::string name = line.substr(0, colon + 1);
-			const std::string text = line.substr(colon + 1);
-			const bool mine = !nickname_.empty() && line.compare(0, std::min(name.size() - 1, nickname_.size()), nickname_, 0, std::min(name.size() - 1, nickname_.size())) == 0;
-			const ImU32 nameColor = mine ? IM_COL32(229, 57, 53, alpha) : IM_COL32(41, 182, 246, alpha);
-			drawList->AddText(ImVec2(min.x + padding, y), nameColor, name.c_str());
-			const float nameWidth = ImGui::CalcTextSize(name.c_str()).x;
-			drawList->AddText(ImVec2(min.x + padding + nameWidth, y), IM_COL32(235, 235, 240, alpha), text.c_str());
-		}
-		y += lineHeight;
-	}
-
-	if (chatScroll_ > 0) {
-		const std::string marker = "v";
-		drawList->AddText(ImVec2(max.x - padding, max.y - padding - lineHeight),
-			IM_COL32(150, 150, 160, alpha), marker.c_str());
-	}
+	chatServer_ = server;
+	chatNickname_ = nickname;
+	// "Mine" colouring depends on the nickname, so the cache has to go.
+	++chatLogVersion_;
 }
 
 void Overlay::DrawSettingsList(ImDrawList *drawList, ImVec2 displaySize, float scale, float ease) {
@@ -2446,7 +2659,7 @@ void Overlay::Render(Draw::DrawContext *draw) {
 
 	const bool hasRAAlerts = !RetroAchievements().Notifications().empty();
 	const bool hasChatAlerts = !chatNotifications_.empty();
-	if (!visible_ && !hasRAAlerts && !hasChatAlerts) {
+	if (!visible_ && !chatDocked_ && !hasRAAlerts && !hasChatAlerts) {
 		return;
 	}
 
@@ -2472,10 +2685,17 @@ void Overlay::Render(Draw::DrawContext *draw) {
 			LoadLoaderTexture(draw);
 		}
 		DrawUI(width, height, io.DeltaTime);
+	} else if (chatDocked_) {
+		// DrawUI drives animTimer_, and it does not run on this path, so the
+		// docked panel keeps its own clock.
+		chatDockAnim_ = std::min(chatDockAnim_ + io.DeltaTime, kOverlayAnimDuration);
+		DrawChatDock(ImGui::GetForegroundDrawList(), ImVec2(width, height), scale,
+			EaseOutCubic(chatDockAnim_ / kOverlayAnimDuration));
 	}
 	DrawRAAlerts(draw, ImGui::GetForegroundDrawList(), ImVec2(width, height), scale, io.DeltaTime);
-	// Suppressed while the chat panel is open: the log is already on screen.
-	if (!(visible_ && menu_ == Menu::Chat)) {
+	// Suppressed while either chat panel is open: the log is already on screen.
+	const bool chatOnScreen = (visible_ && menu_ == Menu::Chat) || chatDocked_;
+	if (!chatOnScreen) {
 		DrawChatAlerts(ImGui::GetForegroundDrawList(), ImVec2(width, height), scale, io.DeltaTime);
 	} else {
 		chatNotifications_.clear();

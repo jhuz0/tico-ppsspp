@@ -995,6 +995,10 @@ void RefreshCheatAvailability() {
 // would only ever show "You're in Offline Mode".
 void RefreshChatAvailability() {
 	g_state.overlay.SetChatEnabled(g_Config.bEnableNetworkChat && g_Config.bEnableWlan);
+	// sNickName is what proAdhoc prefixes chat lines with. The overlay's own
+	// nickname_ is the Switch profile name, which is a different thing and does
+	// not match the log when the two differ.
+	g_state.overlay.SetChatIdentity(g_Config.sProAdhocServer, g_Config.sNickName);
 }
 
 bool ToggleCheatLine(int index) {
@@ -1377,6 +1381,10 @@ void PpssppRuntime::HandleInput(const FrameInput &input) {
 // Mirrors PPSSPP's chat log into the overlay. GetChatChangeID() is bumped by the
 // FriendFinder thread, so this stays cheap when nothing is happening.
 void PollChat() {
+	// The docked panel can be opened without ever touching the quick menu, which
+	// used to be the only place availability was refreshed. Both setters ignore
+	// unchanged values, so this stays cheap.
+	RefreshChatAvailability();
 	if (!g_Config.bEnableNetworkChat) {
 		return;
 	}

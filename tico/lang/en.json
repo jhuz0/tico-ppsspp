@@ -46,6 +46,7 @@
     "emulator_chat": "Chat",
     "emulator_chat_send": "Send message",
     "emulator_chat_empty": "No messages yet",
+    "emulator_chat_dock_help": "A write   B close   D-Pad scroll",
     "emulator_controls": "Controls",
     "emulator_online": "Online",
     "emulator_right_stick": "Right stick",

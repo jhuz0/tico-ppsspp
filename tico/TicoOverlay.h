@@ -73,6 +73,15 @@ enum class ChatAlertPosition {
 	BottomRight,
 };
 
+// One rendered row of a chat panel. A message longer than the panel is split
+// across several rows, carrying the sender name only on the first.
+struct ChatDisplayLine {
+	std::string name;
+	std::string text;
+	bool notice = false;
+	bool mine = false;
+};
+
 // A chat line that briefly slides in while playing, so messages are not missed
 // without opening the menu. Drawn even when the overlay itself is hidden.
 struct ChatNotification {
@@ -107,10 +116,17 @@ public:
 	void SetChatAlertStyle(float durationSeconds, ChatAlertPosition position);
 	void SetChatLog(std::vector<std::string> lines);
 	void PushChatNotification(const std::string &line);
+	// Server and ad hoc nickname shown in the docked panel header. The nickname
+	// is PPSSPP's (ppsspp_nickname), which is not the Switch profile name used
+	// elsewhere in the overlay, and is what chat lines are prefixed with.
+	void SetChatIdentity(const std::string &server, const std::string &nickname);
 	void ReloadDisplaySettings();
 
 	bool IsReady() const { return ready_; }
 	bool IsVisible() const { return visible_; }
+	// The docked panel draws over a running game, so it is deliberately not part
+	// of IsVisible(): that flag is what stops emulation.
+	bool IsChatDocked() const { return chatDocked_; }
 	bool ShouldExitGame() const { return exitRequested_; }
 	void ClearExitRequest() { exitRequested_ = false; }
 	OverlayCommand ConsumeCommand();
@@ -140,6 +156,13 @@ private:
 	void DrawStatus(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease, float deltaTime);
 	void DrawRAAlerts(Draw::DrawContext *draw, ::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float deltaTime);
 	void DrawChat(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
+	void DrawChatDock(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
+	// Shared by both chat panels: lays the log out inside the given box, newest
+	// row pinned to the bottom, clipped so nothing spills over the frame.
+	void DrawChatMessages(::ImDrawList *drawList, ::ImVec2 boxMin, ::ImVec2 boxMax, float scale, int alpha);
+	void RebuildChatDisplayLines(float wrapWidth, float indent);
+	int ChatRowCount() const { return (int)chatDisplayLines_.size(); }
+	bool HandleChatInput(u64 buttons, u64 pressed);
 	void DrawSettingsList(::ImDrawList *drawList, ::ImVec2 displaySize, float scale, float ease);
 	const CoreSetting *CurrentSettingTable(int *count) const;
 	int SettingStorageIndex(int visibleIndex) const;
@@ -196,6 +219,17 @@ private:
 	std::vector<std::string> chatLog_;
 	std::vector<ChatNotification> chatNotifications_;
 	int chatScroll_ = 0;
+	bool chatDocked_ = false;
+	bool dockComboDown_ = false;
+	float chatDockAnim_ = 0.0f;
+	std::string chatServer_;
+	std::string chatNickname_;
+	// Wrapping costs a pass over every message, so the laid out rows are cached
+	// and rebuilt only when the log changes or the panel width does.
+	std::vector<ChatDisplayLine> chatDisplayLines_;
+	float chatDisplayWidth_ = 0.0f;
+	unsigned chatLogVersion_ = 0;
+	unsigned chatDisplayVersion_ = 0;
 	u64 nextChatNavMs_ = 0;
 	u64 lastAnalogNavMs_ = 0;
 	u64 nextCheatVerticalNavMs_ = 0;

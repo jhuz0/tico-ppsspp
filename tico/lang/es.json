@@ -46,6 +46,7 @@
     "emulator_chat": "Chat",
     "emulator_chat_send": "Enviar mensaje",
     "emulator_chat_empty": "Sin mensajes todavia",
+    "emulator_chat_dock_help": "A escribir   B cerrar   Cruceta desplazar",
     "emulator_controls": "Controles",
     "emulator_online": "En linea",
     "emulator_right_stick": "Stick derecho",
